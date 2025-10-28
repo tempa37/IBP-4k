@@ -116,7 +116,9 @@ void HAL_CAN_MspInit(CAN_HandleTypeDef* hcan)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* USER CODE BEGIN CAN1_MspInit 1 */
-
+    /* Настройка прерывания CAN FIFO0 */
+    HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);
     /* USER CODE END CAN1_MspInit 1 */
 
   }
@@ -146,7 +148,8 @@ void HAL_CAN_MspDeInit(CAN_HandleTypeDef* hcan)
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_11|GPIO_PIN_12);
 
     /* USER CODE BEGIN CAN1_MspDeInit 1 */
-
+    /* Отключение прерывания CAN FIFO0 */
+    HAL_NVIC_DisableIRQ(CAN1_RX0_IRQn);
     /* USER CODE END CAN1_MspDeInit 1 */
   }
 
