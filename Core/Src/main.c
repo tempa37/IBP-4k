@@ -729,9 +729,50 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
+    /* Локальные структуры для приёма CAN-кадров */
+    CAN_RxHeaderTypeDef localHeader = {0};
+    uint8_t localData[8] = {0};
   /* Infinite loop */
   for(;;)
   {
+    
+    if (canContext.errorDetected)
+    {
+      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
+      {
+        lastProcessedCanError = canContext.errorCode;
+        lastProcessedCanId = 0u;
+        lastProcessedCanDlc = 0u;
+        /* Комментарий: ошибка CAN - lastProcessedCanError, номер шины - CAN1 */
+        canContext.errorDetected = false;
+        canContext.errorCode = 0u;
+        osMutexRelease(canContext.mutex);
+      }
+    }
+    else if (canContext.dataReady)
+    {
+      uint8_t dataLength = 0u;
+      taskENTER_CRITICAL();
+      localHeader = canContext.header;
+      memcpy(localData, canContext.data, sizeof(localData));
+      uint8_t fillStart = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
+      if (fillStart < sizeof(localData))
+      {
+        memset(&localData[fillStart], 0, sizeof(localData) - fillStart);
+      }
+      canContext.dataReady = false;
+      taskEXIT_CRITICAL();
+
+      dataLength = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
+      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
+      {
+        lastProcessedCanId = (localHeader.IDE == CAN_ID_EXT) ? localHeader.ExtId : localHeader.StdId;
+        lastProcessedCanDlc = dataLength;
+        /* Комментарий: данные - localData, идентификатор CAN - lastProcessedCanId, DLC - dataLength */
+        /* Здесь производится пользовательская обработка CAN-сообщения */
+        osMutexRelease(canContext.mutex);
+      }
+    }
     osDelay(1);
   }
   /* USER CODE END 5 */
@@ -811,50 +852,13 @@ void StartTask02(void const * argument)
 void StartTask03(void const * argument)
 {
   /* USER CODE BEGIN StartTask03 */
-  /* Локальные структуры для приёма CAN-кадров */
-  CAN_RxHeaderTypeDef localHeader = {0};
-  uint8_t localData[8] = {0};
+
 
   for(;;)
   {
-    if (canContext.errorDetected)
-    {
-      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
-      {
-        lastProcessedCanError = canContext.errorCode;
-        lastProcessedCanId = 0u;
-        lastProcessedCanDlc = 0u;
-        /* Комментарий: ошибка CAN - lastProcessedCanError, номер шины - CAN1 */
-        canContext.errorDetected = false;
-        canContext.errorCode = 0u;
-        osMutexRelease(canContext.mutex);
-      }
-    }
-    else if (canContext.dataReady)
-    {
-      uint8_t dataLength = 0u;
-      taskENTER_CRITICAL();
-      localHeader = canContext.header;
-      memcpy(localData, canContext.data, sizeof(localData));
-      uint8_t fillStart = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
-      if (fillStart < sizeof(localData))
-      {
-        memset(&localData[fillStart], 0, sizeof(localData) - fillStart);
-      }
-      canContext.dataReady = false;
-      taskEXIT_CRITICAL();
-
-      dataLength = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
-      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
-      {
-        lastProcessedCanId = (localHeader.IDE == CAN_ID_EXT) ? localHeader.ExtId : localHeader.StdId;
-        lastProcessedCanDlc = dataLength;
-        /* Комментарий: данные - localData, идентификатор CAN - lastProcessedCanId, DLC - dataLength */
-        /* Здесь производится пользовательская обработка CAN-сообщения */
-        osMutexRelease(canContext.mutex);
-      }
-    }
-    osDelay(1);
+    HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_SET);
+    osDelay(100);
+    HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_RESET);
   }
   /* USER CODE END StartTask03 */
 }
