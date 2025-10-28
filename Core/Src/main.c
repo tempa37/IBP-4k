@@ -54,6 +54,7 @@ DMA_HandleTypeDef hdma_uart8_tx;
 
 osThreadId defaultTaskHandle;
 osThreadId myTask02Handle;
+osThreadId WDI_TaskHandle;
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -69,6 +70,7 @@ static void MX_UART7_Init(void);
 static void MX_CAN1_Init(void);
 void StartDefaultTask(void const * argument);
 void StartTask02(void const * argument);
+void StartTask03(void const * argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -142,6 +144,10 @@ int main(void)
   /* definition and creation of myTask02 */
   osThreadDef(myTask02, StartTask02, osPriorityIdle, 0, 1280);
   myTask02Handle = osThreadCreate(osThread(myTask02), NULL);
+
+  /* definition and creation of WDI_Task */
+  osThreadDef(WDI_Task, StartTask03, osPriorityIdle, 0, 128);
+  WDI_TaskHandle = osThreadCreate(osThread(WDI_Task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -513,6 +519,24 @@ void StartTask02(void const * argument)
     osDelay(1);
   }
   /* USER CODE END StartTask02 */
+}
+
+/* USER CODE BEGIN Header_StartTask03 */
+/**
+* @brief Function implementing the WDI_Task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask03 */
+void StartTask03(void const * argument)
+{
+  /* USER CODE BEGIN StartTask03 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartTask03 */
 }
 
 /**
