@@ -77,10 +77,6 @@ void Error_Handler(void);
 #define EN_1_GPIO_Port GPIOG
 #define RS485_ON2_Pin GPIO_PIN_8
 #define RS485_ON2_GPIO_Port GPIOA
-#define UART_RE_DE2_Pin GPIO_PIN_11
-#define UART_RE_DE2_GPIO_Port GPIOA
-#define SOFT_RESET_Pin GPIO_PIN_12
-#define SOFT_RESET_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
