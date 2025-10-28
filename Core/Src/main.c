@@ -732,10 +732,52 @@ void StartDefaultTask(void const * argument)
     /* Локальные структуры для приёма CAN-кадров */
     CAN_RxHeaderTypeDef localHeader = {0};
     uint8_t localData[8] = {0};
+    /*
+     * Локальные буферы для периодического опроса UART.
+     * Для наглядности используем структуру, в которой объединены
+     * сам буфер и фактическая длина данных для каждого канала.
+     */
+    typedef struct
+    {
+      uint8_t data[UART_RX_CHUNK_SIZE];  /* Последние считанные данные конкретного UART */
+      size_t length;                     /* Число валидных байт в data */
+    } UartPollingSnapshot_t;
+
+    static UartPollingSnapshot_t uartPollingSnapshots[UART_CHANNEL_COUNT] = {0};
+    static TickType_t lastUartPollTick = 0u;
+
   /* Infinite loop */
   for(;;)
   {
-    
+
+    TickType_t currentTick = xTaskGetTickCount();
+    if ((currentTick - lastUartPollTick) >= pdMS_TO_TICKS(1000u))
+    {
+      lastUartPollTick = currentTick;
+
+      for (size_t index = 0u; index < UART_CHANNEL_COUNT; ++index)
+      {
+        UartContext_t *context = &uartContexts[index];
+        size_t length = 0u;
+
+        taskENTER_CRITICAL();
+        length = context->rxLength;
+        if (length > UART_RX_CHUNK_SIZE)
+        {
+          length = UART_RX_CHUNK_SIZE;
+        }
+        UartPollingSnapshot_t *snapshot = &uartPollingSnapshots[index];
+
+        memcpy(snapshot->data, context->rxBuffer, length);
+        if (length < UART_RX_CHUNK_SIZE)
+        {
+          memset(&snapshot->data[length], 0, UART_RX_CHUNK_SIZE - length);
+        }
+        snapshot->length = length;
+        taskEXIT_CRITICAL();
+      }
+    }
+
     if (canContext.errorDetected)
     {
       if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
