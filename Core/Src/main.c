@@ -26,12 +26,14 @@
 #include "stdbool.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "modbuc.h"
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-#define UART_RX_CHUNK_SIZE              (16u)  /* Размер блока приёма UART */
+#define MODBUS_RESPONSE_SIZE            (5u + (MODBUS_REGISTER_COUNT * 2u))  /* Размер ответа Modbus для 37 регистров */
+#define UART_RX_CHUNK_SIZE              (MODBUS_RESPONSE_SIZE)               /* Размер блока приёма UART под полный ответ */
 
 /* Перечень используемых UART-каналов */
 typedef enum
@@ -109,6 +111,14 @@ static const uint8_t uartIndexToNumber[UART_CHANNEL_COUNT] = {4u, 5u, 7u, 8u};
 
 /* Контекст CAN для FIFO0 */
 static CanContext_t canContext = {0};
+
+/* Буферы для хранения последних Modbus-ответов по каждому UART */
+static uint8_t modbusRawBuffers[UART_CHANNEL_COUNT][UART_RX_CHUNK_SIZE] = {0};
+static size_t modbusRawLengths[UART_CHANNEL_COUNT] = {0};
+
+/* Распарсенные значения регистров Modbus по каждому UART */
+static uint16_t modbusRegisterBuffers[UART_CHANNEL_COUNT][MODBUS_REGISTER_COUNT] = {0};
+static uint32_t modbusLastUpdateTicks[UART_CHANNEL_COUNT] = {0};
 
 /* Переменные для отладки последних обработанных сообщений */
 static volatile uint8_t lastProcessedUartNumber = 0u;
@@ -790,17 +800,68 @@ void StartTask02(void const * argument)
   /* USER CODE BEGIN StartTask02 */
   /* Локальный буфер для обработки данных UART */
   uint8_t localBuffer[UART_RX_CHUNK_SIZE] = {0};
+  /* Буфер для формирования Modbus-запросов */
+  uint8_t modbusRequest[MODBUS_MAX_REQUEST_SIZE] = {0};
+  /* Отметка времени последнего опроса Modbus */
+  uint32_t lastPollTick = osKernelSysTick();
 
   for(;;)
   {
+    /* Получаем актуальную отметку времени */
+    const uint32_t currentTick = osKernelSysTick();
+
+    /* Раз в секунду отправляем Modbus-запросы на все доступные UART */
+    if ((uint32_t)(currentTick - lastPollTick) >= MODBUS_POLL_PERIOD_MS)
+    {
+      lastPollTick = currentTick;
+      for (size_t index = 0; index < UART_CHANNEL_COUNT; ++index)
+      {
+        UartContext_t *context = &uartContexts[index];
+        if ((context == NULL) || (context->handle == NULL))
+        {
+          continue;
+        }
+
+        /* Не отправляем новый запрос, если ещё не обработан предыдущий ответ или есть ошибка */
+        if (context->dataReady || context->errorDetected)
+        {
+          continue;
+        }
+
+        const size_t requestLength = Modbus_BuildReadHoldingRegistersRequest(
+            MODBUS_DEVICE_ADDRESS,
+            MODBUS_START_REGISTER,
+            MODBUS_REGISTER_COUNT,
+            modbusRequest,
+            sizeof(modbusRequest));
+        if (requestLength == 0u)
+        {
+          continue;
+        }
+
+        if (HAL_UART_Transmit(context->handle, modbusRequest, requestLength, HAL_MAX_DELAY) != HAL_OK)
+        {
+          taskENTER_CRITICAL();
+          context->errorDetected = true;
+          context->errorCode = context->handle->ErrorCode;
+          taskEXIT_CRITICAL();
+        }
+      }
+    }
+
     for (size_t index = 0; index < UART_CHANNEL_COUNT; ++index)
     {
       UartContext_t *context = &uartContexts[index];
+      if (context == NULL)
+      {
+        continue;
+      }
+
       if (context->errorDetected)
       {
         if ((context->mutex != NULL) && (osMutexWait(context->mutex, osWaitForever) == osOK))
         {
-          uint8_t uartNumber = uartIndexToNumber[index];
+          const uint8_t uartNumber = uartIndexToNumber[index];
           lastProcessedUartNumber = uartNumber;
           lastProcessedUartError = context->errorCode;
           /* Комментарий: ошибка UART - lastProcessedUartError, номер UART - uartNumber */
@@ -810,6 +871,7 @@ void StartTask02(void const * argument)
         }
         continue;
       }
+
       if (context->dataReady)
       {
         size_t length = 0u;
@@ -829,10 +891,27 @@ void StartTask02(void const * argument)
 
         if ((context->mutex != NULL) && (osMutexWait(context->mutex, osWaitForever) == osOK))
         {
-          uint8_t uartNumber = uartIndexToNumber[index];
+          const uint8_t uartNumber = uartIndexToNumber[index];
           lastProcessedUartNumber = uartNumber;
-          /* Комментарий: данные - localBuffer, номер UART - uartNumber, длина - length */
-          /* Здесь производится пользовательская обработка пакета UART */
+
+          /* Сохраняем последний принятый Modbus-кадр */
+          memcpy(modbusRawBuffers[index], localBuffer, length);
+          if (length < UART_RX_CHUNK_SIZE)
+          {
+            memset(&modbusRawBuffers[index][length], 0, UART_RX_CHUNK_SIZE - length);
+          }
+          modbusRawLengths[index] = length;
+
+          /* Пытаемся распарсить Modbus-ответ и сохранить регистры */
+          if (Modbus_ParseHoldingRegistersResponse(localBuffer,
+                                                  length,
+                                                  MODBUS_DEVICE_ADDRESS,
+                                                  MODBUS_REGISTER_COUNT,
+                                                  modbusRegisterBuffers[index]))
+          {
+            modbusLastUpdateTicks[index] = osKernelSysTick();
+          }
+
           osMutexRelease(context->mutex);
         }
       }
