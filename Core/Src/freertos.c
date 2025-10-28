@@ -71,4 +71,20 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer, StackTy
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
+/* Функция-хук FreeRTOS для отслеживания переполнения стека */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  /* Комментарий: фиксируем имя задачи с переполнением стека */
+  (void)xTask;
+  (void)pcTaskName;
+  Error_Handler();
+}
+
+/* Функция-хук FreeRTOS для отслеживания ошибок выделения памяти */
+void vApplicationMallocFailedHook(void)
+{
+  /* Комментарий: фиксируем ошибку выделения памяти из кучи */
+  Error_Handler();
+}
+
 /* USER CODE END Application */

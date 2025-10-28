@@ -22,11 +22,50 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "string.h"
+#include "stdbool.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+#define UART_RX_CHUNK_SIZE              (16u)  /* Размер блока приёма UART */
+
+/* Перечень используемых UART-каналов */
+typedef enum
+{
+  UART_CHANNEL_4 = 0u,
+  UART_CHANNEL_5,
+  UART_CHANNEL_7,
+  UART_CHANNEL_8,
+  UART_CHANNEL_COUNT
+} UartChannel_t;
+
+/* Структура для хранения контекста UART */
+typedef struct
+{
+  UART_HandleTypeDef *handle;
+  osMutexId mutex;
+  uint8_t rxTransferBuffer[UART_RX_CHUNK_SIZE];
+  uint8_t rxBuffer[UART_RX_CHUNK_SIZE];
+  size_t rxLength;
+  volatile bool dataReady;
+  volatile bool errorDetected;
+  volatile uint32_t errorCode;
+} UartContext_t;
+
+/* Структура для хранения контекста CAN */
+typedef struct
+{
+  osMutexId mutex;
+  CAN_RxHeaderTypeDef header;
+  uint8_t data[8];
+  volatile bool dataReady;
+  volatile bool errorDetected;
+  volatile uint32_t errorCode;
+} CanContext_t;
 
 /* USER CODE END PTD */
 
@@ -56,6 +95,34 @@ osThreadId defaultTaskHandle;
 osThreadId myTask02Handle;
 osThreadId WDI_TaskHandle;
 /* USER CODE BEGIN PV */
+/* Контексты UART с указателями на соответствующие периферийные модули */
+static UartContext_t uartContexts[UART_CHANNEL_COUNT] =
+{
+  [UART_CHANNEL_4] = { .handle = &huart4 },
+  [UART_CHANNEL_5] = { .handle = &huart5 },
+  [UART_CHANNEL_7] = { .handle = &huart7 },
+  [UART_CHANNEL_8] = { .handle = &huart8 }
+};
+
+/* Таблица соответствия индекса и номера UART для комментариев */
+static const uint8_t uartIndexToNumber[UART_CHANNEL_COUNT] = {4u, 5u, 7u, 8u};
+
+/* Контекст CAN для FIFO0 */
+static CanContext_t canContext = {0};
+
+/* Переменные для отладки последних обработанных сообщений */
+static volatile uint8_t lastProcessedUartNumber = 0u;
+static volatile uint32_t lastProcessedCanId = 0u;
+static volatile uint8_t lastProcessedCanDlc = 0u;
+static volatile uint32_t lastProcessedUartError = 0u;
+static volatile uint32_t lastProcessedCanError = 0u;
+
+/* Определения мьютексов для буферов обмена */
+osMutexDef(UART4BufferMutex);
+osMutexDef(UART5BufferMutex);
+osMutexDef(UART7BufferMutex);
+osMutexDef(UART8BufferMutex);
+osMutexDef(CANBufferMutex);
 
 /* USER CODE END PV */
 
@@ -73,6 +140,8 @@ void StartTask02(void const * argument);
 void StartTask03(void const * argument);
 
 /* USER CODE BEGIN PFP */
+static UartContext_t *Uart_GetContext(UART_HandleTypeDef *handle);
+static void Uart_StartReception(UartContext_t *context);
 
 /* USER CODE END PFP */
 
@@ -117,6 +186,66 @@ int main(void)
   MX_UART7_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
+
+  /* Создание мьютексов для безопасного доступа к UART-буферам */
+  uartContexts[UART_CHANNEL_4].mutex = osMutexCreate(osMutex(UART4BufferMutex));
+  if (uartContexts[UART_CHANNEL_4].mutex == NULL)
+  {
+    Error_Handler();
+  }
+  uartContexts[UART_CHANNEL_5].mutex = osMutexCreate(osMutex(UART5BufferMutex));
+  if (uartContexts[UART_CHANNEL_5].mutex == NULL)
+  {
+    Error_Handler();
+  }
+  uartContexts[UART_CHANNEL_7].mutex = osMutexCreate(osMutex(UART7BufferMutex));
+  if (uartContexts[UART_CHANNEL_7].mutex == NULL)
+  {
+    Error_Handler();
+  }
+  uartContexts[UART_CHANNEL_8].mutex = osMutexCreate(osMutex(UART8BufferMutex));
+  if (uartContexts[UART_CHANNEL_8].mutex == NULL)
+  {
+    Error_Handler();
+  }
+
+  /* Создание мьютекса для буфера CAN */
+  canContext.mutex = osMutexCreate(osMutex(CANBufferMutex));
+  if (canContext.mutex == NULL)
+  {
+    Error_Handler();
+  }
+
+  /* Настройка фильтра CAN и активация приёма */
+  CAN_FilterTypeDef canFilterConfig = {0};
+  canFilterConfig.FilterBank = 0;
+  canFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+  canFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+  canFilterConfig.FilterIdHigh = 0x0000;
+  canFilterConfig.FilterIdLow = 0x0000;
+  canFilterConfig.FilterMaskIdHigh = 0x0000;
+  canFilterConfig.FilterMaskIdLow = 0x0000;
+  canFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
+  canFilterConfig.FilterActivation = ENABLE;
+  canFilterConfig.SlaveStartFilterBank = 14;
+  if (HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_CAN_Start(&hcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* Запуск прерываемого приёма для всех UART-каналов */
+  for (size_t index = 0; index < UART_CHANNEL_COUNT; ++index)
+  {
+    Uart_StartReception(&uartContexts[index]);
+  }
 
   /* USER CODE END 2 */
 
@@ -482,6 +611,111 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/* Поиск контекста UART по указателю на хендл */
+static UartContext_t *Uart_GetContext(UART_HandleTypeDef *handle)
+{
+  for (size_t index = 0; index < UART_CHANNEL_COUNT; ++index)
+  {
+    if (uartContexts[index].handle == handle)
+    {
+      return &uartContexts[index];
+    }
+  }
+  return NULL;
+}
+
+/* Перезапуск приёма UART с использованием прерываний */
+static void Uart_StartReception(UartContext_t *context)
+{
+  if (context == NULL)
+  {
+    return;
+  }
+  if (HAL_UART_Receive_IT(context->handle, context->rxTransferBuffer, UART_RX_CHUNK_SIZE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* Обработчик завершения приёма UART */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  UartContext_t *context = Uart_GetContext(huart);
+  if (context == NULL)
+  {
+    return;
+  }
+
+  UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+  memcpy(context->rxBuffer, context->rxTransferBuffer, UART_RX_CHUNK_SIZE);
+  context->rxLength = UART_RX_CHUNK_SIZE;
+  context->dataReady = true;
+  taskEXIT_CRITICAL_FROM_ISR(irqState);
+
+  /* Комментарий: запускаем следующий цикл приёма UART */
+  Uart_StartReception(context);
+}
+
+/* Обработчик ошибок UART */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  UartContext_t *context = Uart_GetContext(huart);
+  if (context == NULL)
+  {
+    return;
+  }
+
+  UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+  context->errorCode = huart->ErrorCode;
+  context->errorDetected = true;
+  context->dataReady = false;
+  context->rxLength = 0u;
+  taskEXIT_CRITICAL_FROM_ISR(irqState);
+
+  /* Комментарий: перезапуск приёма UART после ошибки */
+  Uart_StartReception(context);
+}
+
+/* Обработчик готовности сообщения CAN из FIFO0 */
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+  if (hcan->Instance != CAN1)
+  {
+    return;
+  }
+
+  CAN_RxHeaderTypeDef header = {0};
+  uint8_t frameData[8] = {0};
+  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, frameData) != HAL_OK)
+  {
+    return;
+  }
+
+  UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+  canContext.header = header;
+  memcpy(canContext.data, frameData, sizeof(frameData));
+  canContext.dataReady = true;
+  taskEXIT_CRITICAL_FROM_ISR(irqState);
+}
+
+/* Обработчик ошибок CAN */
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
+{
+  if (hcan->Instance != CAN1)
+  {
+    return;
+  }
+
+  UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+  canContext.errorCode = hcan->ErrorCode;
+  canContext.errorDetected = true;
+  canContext.dataReady = false;
+  memset(&canContext.header, 0, sizeof(canContext.header));
+  memset(canContext.data, 0, sizeof(canContext.data));
+  taskEXIT_CRITICAL_FROM_ISR(irqState);
+
+  /* Комментарий: при необходимости можно выполнить дополнительный сброс CAN */
+}
 
 /* USER CODE END 4 */
 
@@ -513,9 +747,55 @@ void StartDefaultTask(void const * argument)
 void StartTask02(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
-  /* Infinite loop */
+  /* Локальный буфер для обработки данных UART */
+  uint8_t localBuffer[UART_RX_CHUNK_SIZE] = {0};
+
   for(;;)
   {
+    for (size_t index = 0; index < UART_CHANNEL_COUNT; ++index)
+    {
+      UartContext_t *context = &uartContexts[index];
+      if (context->errorDetected)
+      {
+        if ((context->mutex != NULL) && (osMutexWait(context->mutex, osWaitForever) == osOK))
+        {
+          uint8_t uartNumber = uartIndexToNumber[index];
+          lastProcessedUartNumber = uartNumber;
+          lastProcessedUartError = context->errorCode;
+          /* Комментарий: ошибка UART - lastProcessedUartError, номер UART - uartNumber */
+          context->errorDetected = false;
+          context->errorCode = 0u;
+          osMutexRelease(context->mutex);
+        }
+        continue;
+      }
+      if (context->dataReady)
+      {
+        size_t length = 0u;
+        taskENTER_CRITICAL();
+        length = context->rxLength;
+        if (length > UART_RX_CHUNK_SIZE)
+        {
+          length = UART_RX_CHUNK_SIZE;
+        }
+        memcpy(localBuffer, context->rxBuffer, length);
+        if (length < UART_RX_CHUNK_SIZE)
+        {
+          memset(&localBuffer[length], 0, UART_RX_CHUNK_SIZE - length);
+        }
+        context->dataReady = false;
+        taskEXIT_CRITICAL();
+
+        if ((context->mutex != NULL) && (osMutexWait(context->mutex, osWaitForever) == osOK))
+        {
+          uint8_t uartNumber = uartIndexToNumber[index];
+          lastProcessedUartNumber = uartNumber;
+          /* Комментарий: данные - localBuffer, номер UART - uartNumber, длина - length */
+          /* Здесь производится пользовательская обработка пакета UART */
+          osMutexRelease(context->mutex);
+        }
+      }
+    }
     osDelay(1);
   }
   /* USER CODE END StartTask02 */
@@ -531,9 +811,49 @@ void StartTask02(void const * argument)
 void StartTask03(void const * argument)
 {
   /* USER CODE BEGIN StartTask03 */
-  /* Infinite loop */
+  /* Локальные структуры для приёма CAN-кадров */
+  CAN_RxHeaderTypeDef localHeader = {0};
+  uint8_t localData[8] = {0};
+
   for(;;)
   {
+    if (canContext.errorDetected)
+    {
+      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
+      {
+        lastProcessedCanError = canContext.errorCode;
+        lastProcessedCanId = 0u;
+        lastProcessedCanDlc = 0u;
+        /* Комментарий: ошибка CAN - lastProcessedCanError, номер шины - CAN1 */
+        canContext.errorDetected = false;
+        canContext.errorCode = 0u;
+        osMutexRelease(canContext.mutex);
+      }
+    }
+    else if (canContext.dataReady)
+    {
+      uint8_t dataLength = 0u;
+      taskENTER_CRITICAL();
+      localHeader = canContext.header;
+      memcpy(localData, canContext.data, sizeof(localData));
+      uint8_t fillStart = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
+      if (fillStart < sizeof(localData))
+      {
+        memset(&localData[fillStart], 0, sizeof(localData) - fillStart);
+      }
+      canContext.dataReady = false;
+      taskEXIT_CRITICAL();
+
+      dataLength = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
+      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
+      {
+        lastProcessedCanId = (localHeader.IDE == CAN_ID_EXT) ? localHeader.ExtId : localHeader.StdId;
+        lastProcessedCanDlc = dataLength;
+        /* Комментарий: данные - localData, идентификатор CAN - lastProcessedCanId, DLC - dataLength */
+        /* Здесь производится пользовательская обработка CAN-сообщения */
+        osMutexRelease(canContext.mutex);
+      }
+    }
     osDelay(1);
   }
   /* USER CODE END StartTask03 */
