@@ -26,12 +26,13 @@
 #include "stdbool.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "modbuc.h"
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-#define UART_RX_CHUNK_SIZE              (16u)  /* Размер блока приёма UART */
+#define UART_RX_CHUNK_SIZE              (MODBUS_MAX_FRAME_SIZE)  /* Размер блока приёма UART соответствует максимальному кадру Modbus */
 
 /* Перечень используемых UART-каналов */
 typedef enum
@@ -97,7 +98,7 @@ osThreadId WDI_TaskHandle;
 /* USER CODE BEGIN PV */
 /* Контексты UART с указателями на соответствующие периферийные модули */
 static UartContext_t uartContexts[UART_CHANNEL_COUNT] =
-{
+{ 
   [UART_CHANNEL_4] = { .handle = &huart4 },
   [UART_CHANNEL_5] = { .handle = &huart5 },
   [UART_CHANNEL_7] = { .handle = &huart7 },
@@ -116,6 +117,12 @@ static volatile uint32_t lastProcessedCanId = 0u;
 static volatile uint8_t lastProcessedCanDlc = 0u;
 static volatile uint32_t lastProcessedUartError = 0u;
 static volatile uint32_t lastProcessedCanError = 0u;
+
+/* Буферы для хранения Modbus-запросов и ответов по каждому UART */
+static ModbusChannelBuffer_t modbusBuffers[UART_CHANNEL_COUNT] = {0};
+
+/* Временные метки последнего опроса каждого UART */
+static uint32_t modbusLastPollTick[UART_CHANNEL_COUNT] = {0u};
 
 /* Определения мьютексов для буферов обмена */
 osMutexDef(UART4BufferMutex);
@@ -631,14 +638,15 @@ static void Uart_StartReception(UartContext_t *context)
   {
     return;
   }
-  if (HAL_UART_Receive_IT(context->handle, context->rxTransferBuffer, UART_RX_CHUNK_SIZE) != HAL_OK)
+  /* Запуск приёма UART до наступления тишины на линии */
+  if (HAL_UARTEx_ReceiveToIdle_IT(context->handle, context->rxTransferBuffer, UART_RX_CHUNK_SIZE) != HAL_OK)
   {
     Error_Handler();
   }
 }
 
-/* Обработчик завершения приёма UART */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+/* Обработчик событий приёма UART с фиксацией тишины на линии */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
   UartContext_t *context = Uart_GetContext(huart);
   if (context == NULL)
@@ -647,13 +655,24 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   }
 
   UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-  memcpy(context->rxBuffer, context->rxTransferBuffer, UART_RX_CHUNK_SIZE);
-  context->rxLength = UART_RX_CHUNK_SIZE;
+  size_t copyLength = (Size <= UART_RX_CHUNK_SIZE) ? Size : UART_RX_CHUNK_SIZE;
+  memcpy(context->rxBuffer, context->rxTransferBuffer, copyLength);
+  if (copyLength < UART_RX_CHUNK_SIZE)
+  {
+    memset(&context->rxBuffer[copyLength], 0, UART_RX_CHUNK_SIZE - copyLength);
+  }
+  context->rxLength = copyLength;
   context->dataReady = true;
   taskEXIT_CRITICAL_FROM_ISR(irqState);
 
-  /* Комментарий: запускаем следующий цикл приёма UART */
+  /* Комментарий: немедленно перезапускаем приём для следующего кадра */
   Uart_StartReception(context);
+}
+
+/* Совместимость с обработчиком полного буфера при работе без режима «тишина» */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  HAL_UARTEx_RxEventCallback(huart, UART_RX_CHUNK_SIZE);
 }
 
 /* Обработчик ошибок UART */
@@ -788,14 +807,23 @@ void StartDefaultTask(void const * argument)
 void StartTask02(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
-  /* Локальный буфер для обработки данных UART */
+  /* Начальный регистр для чтения данных по Modbus */
+  static const uint16_t modbusStartRegister = 0u;
+  /* Период опроса всех устройств Modbus в миллисекундах */
+  static const uint32_t modbusPollIntervalMs = 1000u;
+  /* Временный буфер для копирования принятого кадра */
   uint8_t localBuffer[UART_RX_CHUNK_SIZE] = {0};
 
   for(;;)
   {
+    uint32_t currentTick = HAL_GetTick();
+
     for (size_t index = 0; index < UART_CHANNEL_COUNT; ++index)
     {
       UartContext_t *context = &uartContexts[index];
+      ModbusChannelBuffer_t *modbusBuffer = &modbusBuffers[index];
+
+      /* Обработка ошибок UART с фиксацией последнего кода */
       if (context->errorDetected)
       {
         if ((context->mutex != NULL) && (osMutexWait(context->mutex, osWaitForever) == osOK))
@@ -803,13 +831,15 @@ void StartTask02(void const * argument)
           uint8_t uartNumber = uartIndexToNumber[index];
           lastProcessedUartNumber = uartNumber;
           lastProcessedUartError = context->errorCode;
-          /* Комментарий: ошибка UART - lastProcessedUartError, номер UART - uartNumber */
+          /* Сбрасываем флаги ошибки после сохранения диагностической информации */
           context->errorDetected = false;
           context->errorCode = 0u;
           osMutexRelease(context->mutex);
         }
         continue;
       }
+
+      /* Сохранение принятого Modbus-кадра в пользовательский буфер */
       if (context->dataReady)
       {
         size_t length = 0u;
@@ -825,19 +855,30 @@ void StartTask02(void const * argument)
           memset(&localBuffer[length], 0, UART_RX_CHUNK_SIZE - length);
         }
         context->dataReady = false;
+        context->rxLength = 0u;
         taskEXIT_CRITICAL();
 
+        (void)Modbus_SaveResponse(modbusBuffer, localBuffer, length);
+        lastProcessedUartNumber = uartIndexToNumber[index];
+      }
+
+      /* Периодическая генерация Modbus-запросов к каждому из UART-устройств */
+      if ((currentTick - modbusLastPollTick[index]) >= modbusPollIntervalMs)
+      {
         if ((context->mutex != NULL) && (osMutexWait(context->mutex, osWaitForever) == osOK))
         {
-          uint8_t uartNumber = uartIndexToNumber[index];
-          lastProcessedUartNumber = uartNumber;
-          /* Комментарий: данные - localBuffer, номер UART - uartNumber, длина - length */
-          /* Здесь производится пользовательская обработка пакета UART */
+          if (Modbus_PrepareReadRequest(modbusBuffer, modbusStartRegister, MODBUS_REGISTER_COUNT, MODBUS_DEFAULT_SLAVE_ADDRESS))
+          {
+            (void)HAL_UART_Transmit(context->handle, modbusBuffer->request, (uint16_t)modbusBuffer->requestLength, 100u);
+          }
           osMutexRelease(context->mutex);
         }
+        modbusLastPollTick[index] = currentTick;
       }
     }
-    osDelay(1);
+
+    /* Небольшая пауза, чтобы освободить процессор другим задачам */
+    osDelay(10);
   }
   /* USER CODE END StartTask02 */
 }
