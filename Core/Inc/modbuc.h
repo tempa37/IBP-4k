@@ -16,7 +16,7 @@ extern "C" {
 #define MODBUS_DEFAULT_SLAVE_ADDRESS     (0x01u)
 
 /* Количество регистров, запрашиваемых от Modbus-устройства */
-#define MODBUS_REGISTER_COUNT            (37u)
+#define MODBUS_REGISTER_COUNT            (0x01u)
 
 /* Структура для хранения последнего сформированного запроса и ответа */
 typedef struct

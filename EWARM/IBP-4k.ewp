@@ -632,7 +632,7 @@
         </option>
         <option>
           <name>AOutputFile</name>
-          <state></state>
+          <state>$FILE_BNAME$.o</state>
         </option>
         <option>
           <name>ALimitErrorsCheck</name>
@@ -1032,7 +1032,7 @@
         </option>
         <option>
           <name>IlinkTrustzoneImportLibraryOut</name>
-          <state></state>
+          <state>IBP-4k_import_lib.o</state>
         </option>
         <option>
           <name>OILinkExtraOption</name>
@@ -1148,6 +1148,9 @@
       <name>User</name>
       <group>
         <name>Core</name>
+        <file>
+          <name>$PROJ_DIR$\..\Core\Src\modbuc.c</name>
+        </file>
         <file>
           <name>$PROJ_DIR$\..\Core\Src\main.c</name>
         </file>

@@ -89,6 +89,8 @@ UART_HandleTypeDef huart7;
 UART_HandleTypeDef huart8;
 DMA_HandleTypeDef hdma_uart4_rx;
 DMA_HandleTypeDef hdma_uart4_tx;
+DMA_HandleTypeDef hdma_uart7_rx;
+DMA_HandleTypeDef hdma_uart7_tx;
 DMA_HandleTypeDef hdma_uart8_rx;
 DMA_HandleTypeDef hdma_uart8_tx;
 
@@ -400,9 +402,9 @@ static void MX_UART4_Init(void)
   /* USER CODE END UART4_Init 1 */
   huart4.Instance = UART4;
   huart4.Init.BaudRate = 115200;
-  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.WordLength = UART_WORDLENGTH_9B;
   huart4.Init.StopBits = UART_STOPBITS_1;
-  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Parity = UART_PARITY_EVEN;
   huart4.Init.Mode = UART_MODE_TX_RX;
   huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart4.Init.OverSampling = UART_OVERSAMPLING_16;
@@ -433,9 +435,9 @@ static void MX_UART5_Init(void)
   /* USER CODE END UART5_Init 1 */
   huart5.Instance = UART5;
   huart5.Init.BaudRate = 115200;
-  huart5.Init.WordLength = UART_WORDLENGTH_8B;
+  huart5.Init.WordLength = UART_WORDLENGTH_9B;
   huart5.Init.StopBits = UART_STOPBITS_1;
-  huart5.Init.Parity = UART_PARITY_NONE;
+  huart5.Init.Parity = UART_PARITY_EVEN;
   huart5.Init.Mode = UART_MODE_TX_RX;
   huart5.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart5.Init.OverSampling = UART_OVERSAMPLING_16;
@@ -466,9 +468,9 @@ static void MX_UART7_Init(void)
   /* USER CODE END UART7_Init 1 */
   huart7.Instance = UART7;
   huart7.Init.BaudRate = 115200;
-  huart7.Init.WordLength = UART_WORDLENGTH_8B;
+  huart7.Init.WordLength = UART_WORDLENGTH_9B;
   huart7.Init.StopBits = UART_STOPBITS_1;
-  huart7.Init.Parity = UART_PARITY_NONE;
+  huart7.Init.Parity = UART_PARITY_EVEN;
   huart7.Init.Mode = UART_MODE_TX_RX;
   huart7.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart7.Init.OverSampling = UART_OVERSAMPLING_16;
@@ -499,9 +501,9 @@ static void MX_UART8_Init(void)
   /* USER CODE END UART8_Init 1 */
   huart8.Instance = UART8;
   huart8.Init.BaudRate = 115200;
-  huart8.Init.WordLength = UART_WORDLENGTH_8B;
+  huart8.Init.WordLength = UART_WORDLENGTH_9B;
   huart8.Init.StopBits = UART_STOPBITS_1;
-  huart8.Init.Parity = UART_PARITY_NONE;
+  huart8.Init.Parity = UART_PARITY_EVEN;
   huart8.Init.Mode = UART_MODE_TX_RX;
   huart8.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart8.Init.OverSampling = UART_OVERSAMPLING_16;
@@ -528,9 +530,15 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
   /* DMA1_Stream2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
   /* DMA1_Stream4_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
@@ -751,6 +759,10 @@ void StartDefaultTask(void const * argument)
     /* Локальные структуры для приёма CAN-кадров */
     CAN_RxHeaderTypeDef localHeader = {0};
     uint8_t localData[8] = {0};
+    HAL_GPIO_WritePin(GPIOG,
+                  EN_1_Pin | EN_2_Pin | EN_3_Pin | EN_4_Pin,
+                  GPIO_PIN_SET);
+    HAL_GPIO_WritePin(RS485_ON2_GPIO_Port, RS485_ON2_Pin, GPIO_PIN_SET);
   /* Infinite loop */
   for(;;)
   {
@@ -869,7 +881,12 @@ void StartTask02(void const * argument)
         {
           if (Modbus_PrepareReadRequest(modbusBuffer, modbusStartRegister, MODBUS_REGISTER_COUNT, MODBUS_DEFAULT_SLAVE_ADDRESS))
           {
-            (void)HAL_UART_Transmit(context->handle, modbusBuffer->request, (uint16_t)modbusBuffer->requestLength, 100u);
+            HAL_StatusTypeDef st = HAL_UART_Transmit(context->handle, modbusBuffer->request, (uint16_t)modbusBuffer->requestLength, 1000u);
+            if (st != HAL_OK) 
+            {
+              lastProcessedUartNumber = uartIndexToNumber[index];
+              lastProcessedUartError  = uartContexts[index].handle->ErrorCode | (st << 24);
+            }
           }
           osMutexRelease(context->mutex);
         }
