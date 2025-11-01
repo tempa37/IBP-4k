@@ -94,6 +94,7 @@ DMA_HandleTypeDef hdma_uart8_tx;
 osThreadId defaultTaskHandle;
 osThreadId myTask02Handle;
 osThreadId WDI_TaskHandle;
+osThreadId Uart4ToggleTaskHandle;
 /* USER CODE BEGIN PV */
 /* Контексты UART с указателями на соответствующие периферийные модули */
 static UartContext_t uartContexts[UART_CHANNEL_COUNT] =
@@ -138,6 +139,7 @@ static void MX_CAN1_Init(void);
 void StartDefaultTask(void const * argument);
 void StartTask02(void const * argument);
 void StartTask03(void const * argument);
+void StartUart4ToggleTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
 static UartContext_t *Uart_GetContext(UART_HandleTypeDef *handle);
@@ -277,6 +279,10 @@ int main(void)
   /* definition and creation of WDI_Task */
   osThreadDef(WDI_Task, StartTask03, osPriorityIdle, 0, 128);
   WDI_TaskHandle = osThreadCreate(osThread(WDI_Task), NULL);
+
+  /* definition and creation of Uart4ToggleTask */
+  osThreadDef(Uart4ToggleTask, StartUart4ToggleTask, osPriorityIdle, 0, 128);
+  Uart4ToggleTaskHandle = osThreadCreate(osThread(Uart4ToggleTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -559,6 +565,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(UART4_TX_GPIO_Port, UART4_TX_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, BAT_4_Pin|BAT_3_Pin|BAT_2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
@@ -576,6 +585,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(WDI_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : UART4_TX_Pin */
+  GPIO_InitStruct.Pin = UART4_TX_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(UART4_TX_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : BAT_4_Pin BAT_3_Pin BAT_2_Pin */
   GPIO_InitStruct.Pin = BAT_4_Pin|BAT_3_Pin|BAT_2_Pin;
@@ -861,6 +877,38 @@ void StartTask03(void const * argument)
     HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_RESET);
   }
   /* USER CODE END StartTask03 */
+}
+
+/* USER CODE BEGIN Header_StartUart4ToggleTask */
+/**
+  * @brief Function implementing the Uart4ToggleTask thread.
+  * @param argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartUart4ToggleTask */
+void StartUart4ToggleTask(void const * argument)
+{
+  /* USER CODE BEGIN StartUart4ToggleTask */
+  for(;;)
+  {
+    HAL_GPIO_WritePin(UART4_TX_GPIO_Port, UART4_TX_Pin, GPIO_PIN_SET);
+    osDelay(250);
+    HAL_GPIO_WritePin(UART4_TX_GPIO_Port, UART4_TX_Pin, GPIO_PIN_RESET);
+    osDelay(250);
+
+    /* Сигнал 2 (закомментирован): пять импульсов по 50 мс раз в 1 секунду */
+    /*
+    for (uint8_t pulse = 0; pulse < 5; ++pulse)
+    {
+      HAL_GPIO_WritePin(UART4_TX_GPIO_Port, UART4_TX_Pin, GPIO_PIN_SET);
+      osDelay(50);
+      HAL_GPIO_WritePin(UART4_TX_GPIO_Port, UART4_TX_Pin, GPIO_PIN_RESET);
+      osDelay(50);
+    }
+    osDelay(1000);
+    */
+  }
+  /* USER CODE END StartUart4ToggleTask */
 }
 
 /**

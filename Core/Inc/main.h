@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define WDI_Pin GPIO_PIN_0
 #define WDI_GPIO_Port GPIOC
+#define UART4_TX_Pin GPIO_PIN_0
+#define UART4_TX_GPIO_Port GPIOA
 #define BAT_4_Pin GPIO_PIN_13
 #define BAT_4_GPIO_Port GPIOB
 #define BAT_3_Pin GPIO_PIN_14
