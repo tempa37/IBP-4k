@@ -903,6 +903,7 @@ void StartTask02(void const * argument)
           modbusRawLengths[index] = length;
 
           /* Пытаемся распарсить Modbus-ответ и сохранить регистры */
+          //Обработка modbus ответа тут, буффер - modbusRegisterBuffers[index]
           if (Modbus_ParseHoldingRegistersResponse(localBuffer,
                                                   length,
                                                   MODBUS_DEVICE_ADDRESS,
