@@ -16,7 +16,7 @@ extern "C" {
 #define MODBUS_DEFAULT_SLAVE_ADDRESS     (0x01u)
 
 /* Количество регистров, запрашиваемых от Modbus-устройства */
-#define MODBUS_REGISTER_COUNT            (0x01u)
+#define MODBUS_REGISTER_COUNT            (0x25u)
 
 /* Структура для хранения последнего сформированного запроса и ответа */
 typedef struct
@@ -26,6 +26,14 @@ typedef struct
   uint8_t response[MODBUS_MAX_FRAME_SIZE];  /* Буфер с последним полученным ответом */
   size_t responseLength;                    /* Длина последнего ответа */
 } ModbusChannelBuffer_t;
+
+
+/* USER CODE BEGIN Private defines */
+
+
+/* USER CODE END Private defines */
+
+
 
 bool Modbus_PrepareReadRequest(ModbusChannelBuffer_t *buffer,
                                uint16_t startRegister,

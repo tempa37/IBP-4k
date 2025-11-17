@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+
+extern uint8_t swap_crc;
 /* Локальная функция для расчёта контрольной суммы Modbus CRC16 */
 static uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length)
 {
@@ -51,8 +53,16 @@ bool Modbus_PrepareReadRequest(ModbusChannelBuffer_t *buffer,
   buffer->request[5] = (uint8_t)(registerCount & 0xFFu);
 
   uint16_t crc = Modbus_CalculateCRC(buffer->request, 6u);
+  if(!swap_crc)
+  {
   buffer->request[6] = (uint8_t)(crc & 0xFFu);
   buffer->request[7] = (uint8_t)((crc >> 8) & 0xFFu);
+  }
+  else
+  {
+    buffer->request[6] = (uint8_t)((crc >> 8) & 0xFFu);  // Hi
+    buffer->request[7] = (uint8_t)(crc & 0xFFu);         // Lo
+  }
   buffer->requestLength = 8u;
 
   return true;
