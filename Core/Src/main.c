@@ -363,43 +363,45 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 6;
+  RCC_OscInitStruct.PLL.PLLN = 180;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
-
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+ 
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
-    Error_Handler();
+  Error_Handler();
+  }
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                                |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+  {
+   Error_Handler();
   }
 }
 
@@ -475,7 +477,7 @@ static void MX_UART4_Init(void)
   /* USER CODE BEGIN UART4_Init 0 */
 
   /* USER CODE END UART4_Init 0 */
-__HAL_RCC_UART4_CLK_ENABLE();
+
   /* USER CODE BEGIN UART4_Init 1 */
 
   /* USER CODE END UART4_Init 1 */
@@ -762,6 +764,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   HAL_UARTEx_RxEventCallback(huart, UART_RX_CHUNK_SIZE);
 }
 
+volatile uint8_t temp0 = 0;
+volatile uint8_t uart12 = 0;
+
 /* Обработчик ошибок UART */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
@@ -770,17 +775,80 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   {
     return;
   }
-
+  
+  
   UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-  context->errorCode = huart->ErrorCode;
-  context->errorDetected = true;
-  context->dataReady = false;
-  context->rxLength = 0u;
-  taskEXIT_CRITICAL_FROM_ISR(irqState);
+  
+    
 
+        
+        
+  if (huart->ErrorCode & HAL_UART_ERROR_PE) {
+      temp0 = 1;
+  }
+  if (huart->ErrorCode & HAL_UART_ERROR_FE) {
+      temp0 = 2;
+  }
+  if (huart->ErrorCode & HAL_UART_ERROR_NE) {
+      temp0 = 3;
+  }
+  if (huart->ErrorCode & HAL_UART_ERROR_ORE) {
+      temp0 = 4;
+  }
+  if (huart->ErrorCode & HAL_UART_ERROR_DMA) {
+      temp0 = 5;
+  }
+  else 
+  {
+    temp0 = huart->ErrorCode;
+  }
+    
+  
+ 
+  
+  // Определяем UART с помощью switch
+  switch ((uint32_t)huart->Instance)
+  {
+    case (uint32_t)UART4:
+      uart12 = 4;
+      break;
+    case (uint32_t)UART7:
+      uart12 = 7;
+      break;
+    case (uint32_t)UART8:
+      uart12 = 8;
+      break;
+    case (uint32_t)UART5:
+      uart12 = 5;
+      break;
+    default:
+      // неизвестный UART
+      break;
+  }
+  
+
+    __HAL_UART_CLEAR_PEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart); 
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    
+    
+    uint32_t error_code = huart->ErrorCode;
+    
+    huart->Instance->DR; // Чтение DR для очистки некоторых флагов
+
+    context->errorCode = huart->ErrorCode;
+    context->errorDetected = true;
+    context->dataReady = false;
+    context->rxLength = 0u;
+    taskEXIT_CRITICAL_FROM_ISR(irqState);
+  
+    
   /* Комментарий: перезапуск приёма UART после ошибки */
   Uart_StartReception(context);
 }
+
+
 
 /* Обработчик готовности сообщения CAN из FIFO0 */
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
@@ -1215,5 +1283,7 @@ void BAT_UpdateAllIndicators(void)
         // если valid == 0 — мы уже всё выключили выше, так что ничего не делаем
     }
 }
+
+
 
 /* USER CODE END 2 */
