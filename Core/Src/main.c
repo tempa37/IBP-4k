@@ -148,6 +148,12 @@ typedef struct {
 } ModbusSlaveData_t;
 
 
+
+uint8_t uart8_err = 0;
+uint8_t uart7_err = 0;
+uint8_t uart4_err = 0;
+uint8_t uart5_err = 0;
+
 /* Таблица соответствия индекса и номера UART для комментариев */
 static const uint8_t uartIndexToNumber[UART_CHANNEL_COUNT] = {8u, 7u, 4u, 5u};
 
@@ -199,6 +205,7 @@ static void Uart_StartReception(UartContext_t *context);
 void BAT_SetIndicator(uint8_t battery);
 void BAT_UpdateAllIndicators(void);
 bool ParseModbusResponse(const uint8_t *response, size_t length, ModbusSlaveData_t *data_out);
+void Uart_ErrorRecovery(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -730,7 +737,9 @@ static void Uart_StartReception(UartContext_t *context)
   /* Запуск приёма UART до наступления тишины на линии */
   if (HAL_UARTEx_ReceiveToIdle_IT(context->handle, context->rxTransferBuffer, UART_RX_CHUNK_SIZE) != HAL_OK)
   {
-    Error_Handler();
+    context->errorDetected = true;  // Установите флаг для последующего восстановления
+    context->errorCode = context->handle->ErrorCode;  // Сохраните код
+    HAL_UART_ErrorCallback(context->handle);
   }
 }
 
@@ -767,7 +776,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 volatile uint8_t temp0 = 0;
 volatile uint8_t uart12 = 0;
 
-/* Обработчик ошибок UART */
+
+
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   UartContext_t *context = Uart_GetContext(huart);
@@ -775,14 +785,11 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   {
     return;
   }
-  
-  
+ 
   UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-  
-    
-
-        
-        
+ 
+  uint8_t temp0 = 0;  // Добавляем объявление temp0
+ 
   if (huart->ErrorCode & HAL_UART_ERROR_PE) {
       temp0 = 1;
   }
@@ -798,56 +805,46 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   if (huart->ErrorCode & HAL_UART_ERROR_DMA) {
       temp0 = 5;
   }
-  else 
+  else
   {
     temp0 = huart->ErrorCode;
   }
-    
-  
  
-  
-  // Определяем UART с помощью switch
+  // Установка флага ошибки для соответствующего UART
   switch ((uint32_t)huart->Instance)
   {
     case (uint32_t)UART4:
-      uart12 = 4;
+      uart4_err = temp0;
       break;
     case (uint32_t)UART7:
-      uart12 = 7;
+      uart7_err = temp0;
       break;
     case (uint32_t)UART8:
-      uart12 = 8;
+      uart8_err = temp0;
       break;
     case (uint32_t)UART5:
-      uart12 = 5;
+      uart5_err = temp0;
       break;
     default:
       // неизвестный UART
       break;
   }
-  
-
-    __HAL_UART_CLEAR_PEFLAG(huart);
-    __HAL_UART_CLEAR_FEFLAG(huart); 
-    __HAL_UART_CLEAR_NEFLAG(huart);
-    __HAL_UART_CLEAR_OREFLAG(huart);
-    
-    
-    uint32_t error_code = huart->ErrorCode;
-    
-    huart->Instance->DR; // Чтение DR для очистки некоторых флагов
-
-    context->errorCode = huart->ErrorCode;
-    context->errorDetected = true;
-    context->dataReady = false;
-    context->rxLength = 0u;
-    taskEXIT_CRITICAL_FROM_ISR(irqState);
-  
-    
-  /* Комментарий: перезапуск приёма UART после ошибки */
-  Uart_StartReception(context);
+ 
+  __HAL_UART_CLEAR_PEFLAG(huart);
+  __HAL_UART_CLEAR_FEFLAG(huart);
+  __HAL_UART_CLEAR_NEFLAG(huart);
+  __HAL_UART_CLEAR_OREFLAG(huart);
+ 
+  uint32_t error_code = huart->ErrorCode;
+ 
+  huart->Instance->DR; // Чтение DR для очистки некоторых флагов
+  context->errorCode = huart->ErrorCode;
+  context->errorDetected = true;
+  context->dataReady = false;
+  context->rxLength = 0u;
+  taskEXIT_CRITICAL_FROM_ISR(irqState);
+ 
 }
-
 
 
 /* Обработчик готовности сообщения CAN из FIFO0 */
@@ -984,7 +981,7 @@ void StartTask02(void const * argument)
 
 
     
-    
+    Uart_ErrorRecovery();
     
     for (size_t index = 0; index < UART_CHANNEL_COUNT; ++index)
     {
@@ -1284,6 +1281,45 @@ void BAT_UpdateAllIndicators(void)
     }
 }
 
+void Uart_ErrorRecovery(void)
+{
+  UartContext_t *context;
 
+  if (uart4_err != 0) {
+    context = Uart_GetContext(&huart4);  // Предполагаем глобальный huart4
+    if (context != NULL) {
+      Uart_StartReception(context);
+      context->errorDetected = false;
+    }
+    uart4_err = 0;
+  }
+
+  if (uart7_err != 0) {
+    context = Uart_GetContext(&huart7);  // Предполагаем глобальный huart7
+    if (context != NULL) {
+      Uart_StartReception(context);
+      context->errorDetected = false;
+    }
+    uart7_err = 0;
+  }
+
+  if (uart8_err != 0) {
+    context = Uart_GetContext(&huart8);  // Предполагаем глобальный huart8
+    if (context != NULL) {
+      Uart_StartReception(context);
+      context->errorDetected = false;
+    }
+    uart8_err = 0;
+  }
+
+  if (uart5_err != 0) {
+    context = Uart_GetContext(&huart5);  // Предполагаем глобальный huart5
+    if (context != NULL) {
+      Uart_StartReception(context);
+      context->errorDetected = false;
+    }
+    uart5_err = 0;
+  }
+}
 
 /* USER CODE END 2 */
