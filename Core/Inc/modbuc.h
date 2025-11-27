@@ -18,6 +18,11 @@ extern "C" {
 /* Количество регистров, запрашиваемых от Modbus-устройства */
 #define MODBUS_REGISTER_COUNT            (0x25u)
 
+  
+#define MODBUS_SLAVE_ID 0x01   
+  
+#define MODBUS_FUNC_WRITE_SINGLE_REG 0x06
+  
 /* Структура для хранения последнего сформированного запроса и ответа */
 typedef struct
 {

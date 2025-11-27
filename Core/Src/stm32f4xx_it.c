@@ -68,7 +68,7 @@ extern UART_HandleTypeDef huart8;
 extern TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN EV */
-
+extern CAN_HandleTypeDef hcan1; 
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -324,5 +324,21 @@ void UART8_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+/* CAN1 RX0 Interrupt  */
+void CAN1_RX0_IRQHandler(void)
+{
+    HAL_CAN_IRQHandler(&hcan1);
+}
 
+
+void CAN1_TX_IRQHandler(void)
+{
+    HAL_CAN_IRQHandler(&hcan1);
+}
+
+
+void CAN1_SCE_IRQHandler(void)     
+{
+    HAL_CAN_IRQHandler(&hcan1);
+}
 /* USER CODE END 1 */

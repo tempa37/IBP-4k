@@ -1,9 +1,17 @@
 #include "modbuc.h"
 
 #include <string.h>
-
+#include "main.h"
 
 extern uint8_t swap_crc;
+
+extern UART_HandleTypeDef huart4;
+extern UART_HandleTypeDef huart5;
+extern UART_HandleTypeDef huart7;
+extern UART_HandleTypeDef huart8;
+
+
+
 /* Локальная функция для расчёта контрольной суммы Modbus CRC16 */
 static uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length)
 {
@@ -141,4 +149,42 @@ bool Modbus_DecodeRegisters(const ModbusChannelBuffer_t *buffer,
   }
 
   return true;
+}
+
+
+
+int Modbus_WriteRegister(uint16_t reg_addr, uint16_t data, uint8_t battery_block)
+{
+  
+  
+    static UART_HandleTypeDef* battery_uart_map[4] = 
+    {
+      &huart8, // бат. блок 0
+      &huart7, // бат. блок 1
+      &huart4, // бат. блок 2
+      &huart5  // бат. блок 3
+    };
+  
+    if (battery_block > 3)
+        return -1; // ошибка: неверный номер блока
+
+    uint8_t packet[8];
+    UART_HandleTypeDef* huart = battery_uart_map[battery_block];
+
+    packet[0] = MODBUS_SLAVE_ID;           // Slave ID
+    packet[1] = MODBUS_FUNC_WRITE_SINGLE_REG; // Функция 0x06
+    packet[2] = (reg_addr >> 8) & 0xFF;   // Адрес регистра high byte
+    packet[3] = reg_addr & 0xFF;          // Адрес регистра low byte
+    packet[4] = (data >> 8) & 0xFF;       // Значение high byte
+    packet[5] = data & 0xFF;              // Значение low byte
+
+    uint16_t crc = Modbus_CalculateCRC(packet, 6);
+    packet[6] = crc & 0xFF;               // CRC low byte
+    packet[7] = (crc >> 8) & 0xFF;        // CRC high byte
+
+    // Отправляем пакет по UART
+    if (HAL_UART_Transmit(huart, packet, 8, 100) != HAL_OK)
+        return -2; // ошибка передачи
+
+    return 0; // успех
 }
