@@ -63,6 +63,12 @@ typedef struct {
 #define CAN_WRITE_B3        0x4F3U
 #define CAN_WRITE_B4        0x4F4U
 
+#define CAN_FLAG_SLAWE_OS  0x4E1U
+#define CAN_SLAWE_OS       0x4E2U
+
+#define CAN_FLAG_OUR_OS  0x4E3U
+#define CAN_OUR_OS       0x4E4U
+
 /* Глобальные переменные CAN */
 extern CanContext_t canContext;
 extern uint8_t CanlocalData[8];
@@ -73,5 +79,8 @@ void MX_CAN1_Init(void);
 size_t SerializeModbusData(const ModbusSlaveData_t *data_in, uint8_t *buffer_out);
 void SendBatteryDataToCAN(uint8_t block_index, CAN_HandleTypeDef *hcan);
 bool CAN_HandleEnablePinsControl(const uint8_t *can_data, uint8_t data_length);
-
+void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan,
+                                uint32_t stdId,
+                                const uint8_t *data,
+                                uint8_t dlc);          //отправка сообщения
 #endif /* CAN_H */

@@ -46,6 +46,49 @@ extern "C" {
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
+  
+#define FW_CAN_CHUNK_MAX_BYTES   6u
+  
+/* ============================================ */
+/* APPLICATION AREA (Bank 1, Sectors 0-4)      */
+/* ============================================ */
+#define APP_FLASH_SECTOR_START          0u     
+#define APP_FLASH_SECTOR_END            4u     
+
+#define APP_FLASH_BASE_ADDR             0x08000000u
+#define APP_FLASH_END_ADDR              0x0801FFFFu
+#define APP_FLASH_SIZE                  (128u * 1024u)  
+
+
+/* ============================================ */
+/* SLAVE FIRMWARE AREA (Bank 2, Sectors 16-19) */
+/* ============================================ */
+#define SLAVE_FW_SECTOR_START           16u
+#define SLAVE_FW_SECTOR_END             19u
+
+#define SLAVE_FW_BASE_ADDR              0x08110000u
+#define SLAVE_FW_END_ADDR               0x0817FFFFu
+#define SLAVE_FW_SIZE                   (448u * 1024u)  
+
+
+/* ============================================ */
+/* MASTER FIRMWARE AREA (Bank 2, Sectors 20-23)*/
+/* ============================================ */
+#define MASTER_FW_SECTOR_START          20u
+#define MASTER_FW_SECTOR_END            23u
+
+#define MASTER_FW_BASE_ADDR             0x08180000u
+#define MASTER_FW_END_ADDR              0x081FFFFFu
+#define MASTER_FW_SIZE                  (512u * 1024u)  
+
+
+/* ============================================ */
+/* SECTOR SIZE DEFINITIONS                     */
+/* ============================================ */
+#define FLASH_SECTOR_SIZE_16KB          (16u * 1024u)
+#define FLASH_SECTOR_SIZE_64KB          (64u * 1024u)
+#define FLASH_SECTOR_SIZE_128KB         (128u * 1024u)
+
 
 /* USER CODE END EM */
 

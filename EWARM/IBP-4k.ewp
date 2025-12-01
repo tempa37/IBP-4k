@@ -62,7 +62,7 @@
                 </option>
                 <option>
                     <name>RTDescription</name>
-                    <state>Use the full configuration of the C/C++ runtime library. Full locale interface, C locale, file descriptor support, multibytes in printf and scanf, and hex floats in strtod.</state>
+                    <state>A complete configuration of the C/C++14 runtime library. Full locale interface, C locale, file descriptor support, multibytes in printf and scanf, and hex floats in strtod.</state>
                 </option>
                 <option>
                     <name>OGProductVersion</name>
@@ -189,7 +189,7 @@
                 <option>
                     <name>TrustZoneModes</name>
                     <version>0</version>
-                    <state>1</state>
+                    <state>0</state>
                 </option>
                 <option>
                     <name>OGAarch64Abi</name>
@@ -1152,6 +1152,9 @@
                     <name>$PROJ_DIR$\..\Core\Src\can.c</name>
                 </file>
                 <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\can.h</name>
+                </file>
+                <file>
                     <name>$PROJ_DIR$\..\Core\Src\freertos.c</name>
                 </file>
                 <file>
@@ -1171,6 +1174,9 @@
                 </file>
                 <file>
                     <name>$PROJ_DIR$\..\Core\Src\uart.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\uart.h</name>
                 </file>
             </group>
         </group>

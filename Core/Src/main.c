@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "stm32f4xx_hal_flash.h"
 #include "string.h"
 #include "stdbool.h"
 #include "FreeRTOS.h"
@@ -93,6 +94,9 @@ osMutexDef(UART8BufferMutex);
 /* Хранилище данных от Modbus Slave */
 ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT] = {0};
 
+
+static uint16_t slaveFwExpectedPacket = 0u;  //счетчик пакетов ОС слейва
+static uint16_t masterFwExpectedPacket = 0u; //счетчик пакетов нашей ОС
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -109,12 +113,17 @@ void BAT_UpdateAllIndicators(void);
 bool ParseModbusResponse(const uint8_t *response, size_t length, ModbusSlaveData_t *data_out);
 extern int Modbus_WriteRegister(uint16_t reg_addr, uint16_t data, uint8_t battery_block);
 extern void Uart_CheckAndRecover(UartContext_t *ctx);
+extern void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan, uint32_t stdId, const uint8_t *data, uint8_t dlc);    
+
+
+HAL_StatusTypeDef FLASH_EraseSectors(uint32_t firstSector, uint32_t lastSector); //стирает сектора
+HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress, const uint8_t *src, uint32_t length);                            //записывает буффер во флеш 
+static void FW_HandleDataFrame(uint32_t baseAddress, uint32_t areaSize, uint16_t *expectedPacketIdx, const uint8_t *canData, uint8_t dataLength);  //Обработка кадра CAN с обновлением
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* USER CODE END 0 */
 
 /**
   * @brief  The application entry point.
@@ -594,6 +603,45 @@ void StartDefaultTask(void const * argument)
           case CAN_CMD_EN_PINS:  // 0x40E - управление пинами EN/1-EN/4
             CAN_HandleEnablePinsControl(CanlocalData, dataLength);
             break;
+            
+          /* ----------- ОС слейва: стереть область и подтвердить ----------- */
+          case CAN_FLAG_SLAWE_OS:
+          {
+            if (FLASH_EraseSectors(SLAVE_FW_SECTOR_START, SLAVE_FW_SECTOR_END) == HAL_OK)
+            {
+              slaveFwExpectedPacket = 0u;
+              /* Отправляем обратно кадр с тем же ID и пустыми данными */
+              CAN_SendSimpleFrame(&hcan1, CAN_FLAG_SLAWE_OS, NULL, 0u);
+            }
+            break;
+          }
+
+          /* ----------- ОС слейва: принять и сохранить данные ----------- */
+          case CAN_SLAWE_OS:
+          {
+            FW_HandleDataFrame(SLAVE_FW_BASE_ADDR, SLAVE_FW_SIZE, &slaveFwExpectedPacket, CanlocalData, dataLength);
+            break;
+          }
+
+          /* ----------- Наша ОС (master): стереть область и подтвердить ----------- */
+          case CAN_FLAG_OUR_OS:
+          {
+            if (FLASH_EraseSectors(MASTER_FW_SECTOR_START, MASTER_FW_SECTOR_END) == HAL_OK)
+            {
+              masterFwExpectedPacket = 0u;
+              CAN_SendSimpleFrame(&hcan1, CAN_FLAG_OUR_OS, NULL, 0u);
+            }
+            break;
+          }
+
+          /* ----------- Наша ОС (master): принять и сохранить данные ----------- */
+          case CAN_OUR_OS:
+          {
+            FW_HandleDataFrame(MASTER_FW_BASE_ADDR, MASTER_FW_SIZE, &masterFwExpectedPacket, CanlocalData, dataLength);
+            break;
+          }
+            
+            
         }
           
         if(block_num != 0xFF)
@@ -796,3 +844,88 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+/* Общая функция стирания диапазона секторов */
+HAL_StatusTypeDef FLASH_EraseSectors(uint32_t firstSector, uint32_t lastSector)
+{
+    HAL_StatusTypeDef status;
+    FLASH_EraseInitTypeDef eraseInit = {0};
+    uint32_t sectorError = 0;
+
+    eraseInit.TypeErase    = FLASH_TYPEERASE_SECTORS;
+    eraseInit.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+    eraseInit.Sector       = firstSector;
+    eraseInit.NbSectors    = (lastSector - firstSector + 1u);
+
+    HAL_FLASH_Unlock();
+    status = HAL_FLASHEx_Erase(&eraseInit, &sectorError);
+    HAL_FLASH_Lock();
+
+    return status;
+}
+
+/* Запись произвольного буфера во флеш побайтно (медленно, но надёжно) */
+HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress,
+                                           const uint8_t *src,
+                                           uint32_t length)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
+    HAL_FLASH_Unlock();
+
+    for (uint32_t i = 0; i < length; i++)
+    {
+        status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, dstAddress + i, src[i]);
+        if (status != HAL_OK)
+        {
+            break;
+        }
+    }
+
+    HAL_FLASH_Lock();
+
+    return status;
+}
+
+/* Обработка кадра с данными прошивки (общая для нашей ОС и ОС слейва) */
+static void FW_HandleDataFrame(uint32_t baseAddress,
+                               uint32_t areaSize,
+                               uint16_t *expectedPacketIdx,
+                               const uint8_t *canData,
+                               uint8_t dataLength)
+{
+    /* Ожидаем минимум 2 байта индекса и ≥1 байт данных */
+    if (canData == NULL || dataLength < 3u)
+    {
+        return;
+    }
+
+    uint16_t packetIdx = (uint16_t)((canData[0] << 8) | canData[1]);
+    const uint8_t *payload = &canData[2];
+    uint8_t payloadLen = (uint8_t)(dataLength - 2u);
+
+    /* Можно проверять порядок пакетов (опционально) */
+    if (packetIdx != *expectedPacketIdx)
+    {
+        /* Если порядок критичен – можно просто return или
+           сбросить приём, как решишь. Сейчас принимаем как есть. */
+        *expectedPacketIdx = packetIdx;
+    }
+
+    uint32_t offset = (uint32_t)packetIdx * FW_CAN_CHUNK_MAX_BYTES;
+
+    /* Защита от выхода за пределы области */
+    if ((offset + payloadLen) > areaSize)
+    {
+        return;
+    }
+
+    uint32_t writeAddress = baseAddress + offset;
+
+    (void)FLASH_WriteBuffer(writeAddress, payload, payloadLen);
+
+    (*expectedPacketIdx)++;
+}
+
+

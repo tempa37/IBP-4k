@@ -281,3 +281,35 @@ bool CAN_HandleEnablePinsControl(const uint8_t *can_data, uint8_t data_length)
     
     return true;
 }
+
+
+
+
+/* Отправка простого CAN-кадра с указанным CAN Id и пустыми/произвольными данными */
+void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan,
+                                uint32_t stdId,
+                                const uint8_t *data,
+                                uint8_t dlc)
+{
+    CAN_TxHeaderTypeDef txHeader;
+    uint32_t txMailbox;
+    uint8_t  txData[8] = {0};
+
+    if (dlc > 8u) dlc = 8u;
+    if (data != NULL && dlc > 0u)
+    {
+        memcpy(txData, data, dlc);
+    }
+
+    txHeader.StdId = stdId;
+    txHeader.ExtId = 0;
+    txHeader.RTR   = CAN_RTR_DATA;
+    txHeader.IDE   = CAN_ID_STD;
+    txHeader.DLC   = dlc;
+    txHeader.TransmitGlobalTime = DISABLE;
+
+    if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0u)
+    {
+        (void)HAL_CAN_AddTxMessage(hcan, &txHeader, txData, &txMailbox);
+    }
+}
