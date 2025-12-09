@@ -73,6 +73,9 @@ typedef struct {
 
 #define CAN_MASSAGE_OK       0x4E3U //этот флаг отсылаем мы, говорит о том что блок с прошивкой получен (+data0 = 0/1)
 
+#define CAN_SLAVE_UPDATE_START 0x4FA //  + data[0] = номер слейва (батарейного блока)
+
+
 /* Глобальные переменные CAN */
 extern CanContext_t canContext;
 extern uint8_t CanlocalData[8];

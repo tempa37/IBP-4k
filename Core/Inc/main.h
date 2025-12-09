@@ -28,7 +28,7 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f4xx_hal.h"
-
+#include "uart.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -109,6 +109,11 @@ extern "C" {
 
 #define FLASH_UPDATE_FLAG_ADDR 0x08100000UL
 #define FLASH_UPDATE_FLAG_SECTOR FLASH_SECTOR_12
+  
+  
+  
+#define STM32_BOOTLOADER_ACK   0x79u
+#define STM32_BOOTLOADER_NACK  0x1Fu
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/

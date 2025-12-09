@@ -30,7 +30,7 @@
 #include "modbuc.h"
 #include "uart.h"
 #include "can.h"
-
+#include "slave_update_thread.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -97,6 +97,8 @@ ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT] = {0};
 volatile uint32_t crc32 = 0;
 volatile uint32_t iar_crc32 = 0;
 
+
+
 /**
  * @brief Структура состояния процесса обновления прошивки
  */
@@ -140,6 +142,32 @@ uint32_t compute_flash_myos_crc(void);
 
 
 HAL_StatusTypeDef Set_Update_Flag(void);
+
+
+
+
+
+
+
+
+typedef struct {
+    volatile uint8_t ack;
+    volatile uint8_t need_update;
+} SlaveDevice_t;
+
+typedef struct {
+    SlaveDevice_t device[UART_CHANNEL_COUNT];
+    volatile uint8_t os_in_flash;  
+} SlaveSystem_t;
+
+SlaveSystem_t slave = {0};
+
+
+//пример
+//slave.device[0].ack = 0x79;       --ответ
+//slave.device[0].need_update = 1;  --нужно обновление
+//slave.os_in_flash = 1;            --ОС в памяти есть
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -741,6 +769,42 @@ void StartDefaultTask(void const * argument)
             FW_HandleDataPacket(&masterFwState, CanlocalData, dataLength);
             break;
           }
+          
+          /* ============================================================
+             КОМАНДА ЗАПУСКА ОБНОВЛЕНИЯ SLAVE (0x4FA)
+             ============================================================ */
+          case CAN_SLAVE_UPDATE_START:
+          {
+            uint8_t slaveNum = 0xFF;
+            uint8_t responseData[2];
+            
+            // Извлекаем номер слейва из первого байта
+            if (dataLength >= 1u)
+            {
+              slaveNum = CanlocalData[0];
+            }
+            
+            // Проверяем корректность номера слейва
+            if (slaveNum < UART_CHANNEL_COUNT)
+            {
+              // Устанавливаем флаг необходимости обновления для указанного слейва
+              slave.device[slaveNum].need_update = 1;
+              
+              responseData[0] = slaveNum;  // Эхо номера слейва
+              responseData[1] = 0xFF;      // Статус: OK
+            }
+            else
+            {
+              // Некорректный номер слейва
+              responseData[0] = slaveNum;  // Эхо номера слейва
+              responseData[1] = 0x00;      // Статус: ошибка
+            }
+            
+            // Отправляем подтверждение
+            CAN_SendSimpleFrame(&hcan1, CAN_MASSAGE_OK, responseData, 2u);
+            
+            break;
+          }
             
             
         }
@@ -826,6 +890,31 @@ void StartTask02(void const * argument)
         context->rxLength = 0u;
         taskEXIT_CRITICAL();
 
+        
+        /* Проверка на ACK/NACK от bootloader */
+      if (length == 1u)
+      {
+        if (localBuffer[0] == 0x79)  // ACK
+        {
+          // Обработка ACK - успешное подтверждение команды
+          // Здесь можно установить флаг для перехода к следующей команде bootloader
+          slave.device[index].ack = localBuffer[0];
+        }
+        else if (localBuffer[0] == 0x1F)  // NACK
+        {
+          // Обработка NACK - команда отклонена
+          // Можно повторить команду или обработать ошибку
+          slave.device[index].ack = localBuffer[0];
+        }
+        else
+        {
+          // Неизвестный однобайтовый ответ
+          modbusSlaveData[index].valid = false;
+        }
+      }
+      else
+      {
+        
         (void)Modbus_SaveResponse(modbusBuffer, localBuffer, length);
         
         /* Парсим ответ и заполняем структуру */
@@ -837,12 +926,12 @@ void StartTask02(void const * argument)
         {
             // Ошибка парсинга
             modbusSlaveData[index].valid = false;
-        }
-        
+        }    
         lastProcessedUartNumber = uartIndexToNumber[index];
+        BAT_UpdateAllIndicators();  // Обновление индикаторов (LED)
       }
-
-      BAT_UpdateAllIndicators();  // Обновление индикаторов (LED)
+      
+      
       
       /* Периодическая генерация Modbus-запросов к каждому из UART-устройств */
       if ((currentTick - modbusLastPollTick[index]) >= modbusPollIntervalMs)
@@ -867,6 +956,7 @@ void StartTask02(void const * argument)
 
     /* Небольшая пауза, чтобы освободить процессор другим задачам */
     osDelay(10);
+  }
   }
   /* USER CODE END StartTask02 */
 }
@@ -902,7 +992,7 @@ void StartTask03(void const * argument)
 void StartTask04(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
-
+  
 
 
   for(;;)
@@ -1127,8 +1217,11 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                 }
           
             }
-          
-          
+           else if(state == &slaveFwState)
+           {
+            slave.os_in_flash = 1;
+           }
+           
             //state->updateInProgress = false;
             //crc32 = compute_flash_myos_crc();
             //iar_crc32 = *(const uint32_t *)(FLASH_MYOS_END_ADDR - 3);
@@ -1220,4 +1313,4 @@ HAL_StatusTypeDef Set_Update_Flag(void)
     //return status;
 }
 
-
+//------------------------------------------------------------------------------

@@ -18,7 +18,7 @@ typedef enum
     UART_CHANNEL_7,
     UART_CHANNEL_4,
     UART_CHANNEL_5,
-    UART_CHANNEL_COUNT
+    UART_CHANNEL_COUNT  
 } UartChannel_t;
 
 /* Структура для хранения контекста UART */

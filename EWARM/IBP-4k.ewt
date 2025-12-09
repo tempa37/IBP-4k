@@ -1739,6 +1739,12 @@
                     <name>$PROJ_DIR$\..\Core\Src\modbuc.c</name>
                 </file>
                 <file>
+                    <name>$PROJ_DIR$\..\Core\Src\slave_update_thread.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\slave_update_thread.h</name>
+                </file>
+                <file>
                     <name>$PROJ_DIR$\..\Core\Src\stm32f4xx_hal_msp.c</name>
                 </file>
                 <file>
