@@ -47,49 +47,68 @@ extern "C" {
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
   
-#define FW_CAN_CHUNK_MAX_BYTES   6u
+
+#define FW_BLOCK_SIZE_PACKETS       10u    
+#define FW_PACKET_DATA_SIZE         6u      
+#define FW_BLOCK_SIZE_BYTES         (FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE)  
   
-/* ============================================ */
-/* APPLICATION AREA (Bank 1, Sectors 0-4)      */
-/* ============================================ */
-#define APP_FLASH_SECTOR_START          0u     
-#define APP_FLASH_SECTOR_END            4u     
+  
+  
+// ============================================================================
+// 1. BOOTLOADER REGION (256 KB)
+// Sectors: 0, 1, 2, 3 (16K each), 4 (64K), 5 (128K)
+// ============================================================================
+#define FLASH_BOOT_START_ADDR     0x08000000UL
+#define FLASH_BOOT_END_ADDR       0x0803FFFFUL
+#define FLASH_BOOT_SIZE           (FLASH_BOOT_END_ADDR - FLASH_BOOT_START_ADDR + 1)
+#define FLASH_BOOT_START_SECTOR   FLASH_SECTOR_0
+#define FLASH_BOOT_END_SECTOR     FLASH_SECTOR_5
+#define FLASH_BOOT_SECTOR_COUNT   6
 
-#define APP_FLASH_BASE_ADDR             0x08000000u
-#define APP_FLASH_END_ADDR              0x0801FFFFu
-#define APP_FLASH_SIZE                  (128u * 1024u)  
+// ============================================================================
+// 2. APPLICATION REGION (512 KB)
+// Sectors: 6, 7, 8, 9 (128K each)
+// ============================================================================
+#define FLASH_APP_START_ADDR      0x08040000UL
+#define FLASH_APP_END_ADDR        0x0805FFFFUL
+#define FLASH_APP_SIZE            (FLASH_APP_END_ADDR - FLASH_APP_START_ADDR + 1)
+#define FLASH_APP_START_SECTOR    FLASH_SECTOR_6
+#define FLASH_APP_END_SECTOR      FLASH_SECTOR_6
+#define FLASH_APP_SECTOR_COUNT    4
 
+// ============================================================================
+// 3. UNUSED GAP (384 KB)
+// Sectors: 10, 11 (Bank 1) & 12, 13, 14, 15, 16 (Bank 2 start)
+// Use this for params or logs if needed.
+// ============================================================================
+#define FLASH_UNUSED_START_ADDR   0x080C0000UL
+#define FLASH_UNUSED_END_ADDR     0x0811FFFFUL
+#define FLASH_UNUSED_SIZE         (FLASH_UNUSED_END_ADDR - FLASH_UNUSED_START_ADDR + 1)
 
-/* ============================================ */
-/* SLAVE FIRMWARE AREA (Bank 2, Sectors 16-19) */
-/* ============================================ */
-#define SLAVE_FW_SECTOR_START           16u
-#define SLAVE_FW_SECTOR_END             19u
+// ============================================================================
+// 4. myOS REGION (512 KB)
+// Sectors: 17, 18, 19, 20 (128K each)
+// ============================================================================
+#define FLASH_MYOS_START_ADDR     0x08120000UL
+#define FLASH_MYOS_END_ADDR       0x0813FFFFUL
+#define FLASH_MYOS_SIZE           (FLASH_MYOS_END_ADDR - FLASH_MYOS_START_ADDR + 1)
+#define FLASH_MYOS_START_SECTOR   FLASH_SECTOR_17
+#define FLASH_MYOS_END_SECTOR     FLASH_SECTOR_17
+#define FLASH_MYOS_SECTOR_COUNT   4
 
-#define SLAVE_FW_BASE_ADDR              0x08110000u
-#define SLAVE_FW_END_ADDR               0x0817FFFFu
-#define SLAVE_FW_SIZE                   (448u * 1024u)  
+// ============================================================================
+// 5. slaveOS REGION (384 KB)
+// Sectors: 21, 22, 23 (128K each)
+// ============================================================================
+#define FLASH_SLAVEOS_START_ADDR  0x081A0000UL
+#define FLASH_SLAVEOS_END_ADDR    0x081FFFFFUL
+#define FLASH_SLAVEOS_SIZE        (FLASH_SLAVEOS_END_ADDR - FLASH_SLAVEOS_START_ADDR + 1)
+#define FLASH_SLAVEOS_START_SECTOR FLASH_SECTOR_21
+#define FLASH_SLAVEOS_END_SECTOR   FLASH_SECTOR_23
+#define FLASH_SLAVEOS_SECTOR_COUNT 3
 
-
-/* ============================================ */
-/* MASTER FIRMWARE AREA (Bank 2, Sectors 20-23)*/
-/* ============================================ */
-#define MASTER_FW_SECTOR_START          20u
-#define MASTER_FW_SECTOR_END            23u
-
-#define MASTER_FW_BASE_ADDR             0x08180000u
-#define MASTER_FW_END_ADDR              0x081FFFFFu
-#define MASTER_FW_SIZE                  (512u * 1024u)  
-
-
-/* ============================================ */
-/* SECTOR SIZE DEFINITIONS                     */
-/* ============================================ */
-#define FLASH_SECTOR_SIZE_16KB          (16u * 1024u)
-#define FLASH_SECTOR_SIZE_64KB          (64u * 1024u)
-#define FLASH_SECTOR_SIZE_128KB         (128u * 1024u)
-
-
+#define FLASH_UPDATE_FLAG_ADDR 0x08100000UL
+#define FLASH_UPDATE_FLAG_SECTOR FLASH_SECTOR_12
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/

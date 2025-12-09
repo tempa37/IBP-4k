@@ -2,10 +2,10 @@
 /*-Editor annotation file-*/
 /* IcfEditorFile="$TOOLKIT_DIR$\config\ide\IcfEditor\cortex_v1_0.xml" */
 /*-Specials-*/
-define symbol __ICFEDIT_intvec_start__ = 0x08000000;
+define symbol __ICFEDIT_intvec_start__ = 0x08040000;
 /*-Memory Regions-*/
-define symbol __ICFEDIT_region_ROM_start__    = 0x08000000;
-define symbol __ICFEDIT_region_ROM_end__      = 0x081FFFFF;
+define symbol __ICFEDIT_region_ROM_start__    = 0x08040000;
+define symbol __ICFEDIT_region_ROM_end__      = 0x0805FFFF;
 define symbol __ICFEDIT_region_RAM_start__    = 0x20000000;
 define symbol __ICFEDIT_region_RAM_end__      = 0x2002FFFF;
 define symbol __ICFEDIT_region_CCMRAM_start__ = 0x10000000;
@@ -14,6 +14,7 @@ define symbol __ICFEDIT_region_CCMRAM_end__   = 0x1000FFFF;
 define symbol __ICFEDIT_size_cstack__ = 0x400;
 define symbol __ICFEDIT_size_heap__   = 0x200;
 /**** End of ICF editor section. ###ICF###*/
+
 
 
 define memory mem with size = 4G;
@@ -27,8 +28,40 @@ define block HEAP      with alignment = 8, size = __ICFEDIT_size_heap__     { };
 initialize by copy { readwrite };
 do not initialize  { section .noinit };
 
+/* ---------------- Flash layout (согласовано с C-дефайнами) --------------- */
+/* 1. Bootloader 0x0800 0000 - 0x0803 FFFF (256 KB) */
+define region FLASH_BOOT_region   = mem:[from 0x08000000 to 0x0803FFFF];
+
+/* 2. Application 0x0804 0000 - 0x0805 FFFF (128 KB) */
+define region FLASH_APP_region    = mem:[from 0x08040000 to 0x0805FFFF];
+
+/* 3. UNUSED / параметры / логи 0x080C 0000 - 0x0811 FFFF (384 KB) */
+define region FLASH_UNUSED_region = mem:[from 0x080C0000 to 0x0811FFFF];
+
+/* 4. myOS 0x0812 0000 - 0x0819 FFFF (128 KB) */
+define region FLASH_MYOS_region   = mem:[from 0x08120000 to 0x0813FFFF];
+
+/* 5. slaveOS 0x081A 0000 - 0x081F FFFF (384 KB) */
+define region FLASH_SLAVEOS_region = mem:[from 0x081A0000 to 0x081FFFFF];
+
+/* Вектор прерываний по-прежнему в начале bootloader */
 place at address mem:__ICFEDIT_intvec_start__ { readonly section .intvec };
 
-place in ROM_region   { readonly };
+/* Общий ROM_region можно оставить для "прочего" readonly, если нужно */
+place in ROM_region { readonly };
+
+/* контрольная сумма crc32 */
+place at end of ROM_region { readonly section .checksum };
+
+/* Размещение конкретных секций по регионам.
+   Тут подставь реальные имена секций из проекта: .boot_code, .app_code и т.п. */
+place in FLASH_BOOT_region    { section .boot_code, section .boot_const };
+place in FLASH_APP_region     { section .app_code,  section .app_const  };
+place in FLASH_MYOS_region    { section .myos_code, section .myos_const };
+place in FLASH_SLAVEOS_region { section .slave_code, section .slave_const };
+
+/* UNUSED регион можно использовать под параметры/логи, например: */
+place in FLASH_UNUSED_region  { section .flash_params, section .flash_logs };
+
 place in RAM_region   { readwrite,
                         block CSTACK, block HEAP };

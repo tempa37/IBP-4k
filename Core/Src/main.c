@@ -94,9 +94,25 @@ osMutexDef(UART8BufferMutex);
 /* Хранилище данных от Modbus Slave */
 ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT] = {0};
 
+volatile uint32_t crc32 = 0;
+volatile uint32_t iar_crc32 = 0;
 
-static uint16_t slaveFwExpectedPacket = 0u;  //счетчик пакетов ОС слейва
-static uint16_t masterFwExpectedPacket = 0u; //счетчик пакетов нашей ОС
+/**
+ * @brief Структура состояния процесса обновления прошивки
+ */
+typedef struct {
+    bool updateInProgress;              // Флаг: идет процесс обновления
+    uint16_t totalBlocksExpected;       // Общее количество блоков к записи
+    uint16_t currentBlockNum;           // Номер текущего блока (0, 1, 2, ...)
+    uint8_t packetsInCurrentBlock;      // Сколько пакетов уже получено в текущем блоке (0..9)
+    uint8_t blockBuffer[60];            // Буфер для накопления 10 пакетов (10 * 6 = 60 байт)
+    uint32_t writeAddress;              // Текущий адрес записи во flash
+} FirmwareUpdateState_t;
+
+// Состояния обновления для slave и master прошивок
+static FirmwareUpdateState_t slaveFwState = {0};
+static FirmwareUpdateState_t masterFwState = {0};
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -106,7 +122,7 @@ static void MX_DMA_Init(void);
 void StartDefaultTask(void const * argument);
 void StartTask02(void const * argument);
 void StartTask03(void const * argument);
-
+void StartTask04(void const * argument);
 /* USER CODE BEGIN PFP */
 void BAT_SetIndicator(uint8_t battery);
 void BAT_UpdateAllIndicators(void);
@@ -118,7 +134,12 @@ extern void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan, uint32_t stdId, const u
 
 HAL_StatusTypeDef FLASH_EraseSectors(uint32_t firstSector, uint32_t lastSector); //стирает сектора
 HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress, const uint8_t *src, uint32_t length);                            //записывает буффер во флеш 
-static void FW_HandleDataFrame(uint32_t baseAddress, uint32_t areaSize, uint16_t *expectedPacketIdx, const uint8_t *canData, uint8_t dataLength);  //Обработка кадра CAN с обновлением
+static void FW_HandleDataPacket(FirmwareUpdateState_t *state, const uint8_t *canData, uint8_t dataLength);  //Обработка кадра CAN с обновлением
+
+uint32_t compute_flash_myos_crc(void);
+
+
+HAL_StatusTypeDef Set_Update_Flag(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -132,7 +153,12 @@ static void FW_HandleDataFrame(uint32_t baseAddress, uint32_t areaSize, uint16_t
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+    // === Установка вектора прерываний приложения ===
+    // SystemInit() может уже это делать, но лучше явно
+    SCB->VTOR = FLASH_APP_START_ADDR;
+    
+    // Включить прерывания (если были выключены в bootloader)
+    __enable_irq();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -216,7 +242,7 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 1280);
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128); //1280
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of myTask02 */
@@ -228,7 +254,8 @@ int main(void)
   WDI_TaskHandle = osThreadCreate(osThread(WDI_Task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  osThreadDef(myTask04, StartTask04, osPriorityIdle, 0, 128);
+  myTask02Handle = osThreadCreate(osThread(myTask04), NULL);
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -468,13 +495,13 @@ void BAT_SetIndicator(uint8_t battery)
     
     ModbusSlaveData_t *data = &modbusSlaveData[battery];
     
-    GPIO_PinState state = GPIO_PIN_SET;
+    volatile GPIO_PinState state = GPIO_PIN_SET;
     
     
     //Если есть связь с блоком
     if(data->valid) 
     {
-      GPIO_PinState state = GPIO_PIN_RESET;
+      state = GPIO_PIN_RESET;
     }
 
     
@@ -604,40 +631,114 @@ void StartDefaultTask(void const * argument)
             CAN_HandleEnablePinsControl(CanlocalData, dataLength);
             break;
             
-          /* ----------- ОС слейва: стереть область и подтвердить ----------- */
+          /* ============================================================
+             ОБНОВЛЕНИЕ ОС SLAVE: НАЧАЛО (0x4E1)
+             ============================================================ */
           case CAN_FLAG_SLAWE_OS:
           {
-            if (FLASH_EraseSectors(SLAVE_FW_SECTOR_START, SLAVE_FW_SECTOR_END) == HAL_OK)
+            // Извлекаем количество блоков из данных CAN-кадра
+            uint16_t totalBlocks = 0u;
+            if (dataLength >= 2u)
             {
-              slaveFwExpectedPacket = 0u;
-              /* Отправляем обратно кадр с тем же ID и пустыми данными */
-              CAN_SendSimpleFrame(&hcan1, CAN_FLAG_SLAWE_OS, NULL, 0u);
+              totalBlocks = (uint16_t)((CanlocalData[0] << 8) | CanlocalData[1]);
             }
+
+            // Стираем секторы flash для прошивки slave
+            HAL_StatusTypeDef eraseStatus = FLASH_EraseSectors(FLASH_SLAVEOS_START_SECTOR, 
+                                                               FLASH_SLAVEOS_END_SECTOR);
+
+            // Формируем ответ
+            uint8_t responseData[1];
+
+            if (eraseStatus == HAL_OK && totalBlocks > 0u)
+            {
+              // Стирание успешно - инициализируем процесс обновления
+              memset(&slaveFwState, 0, sizeof(slaveFwState));
+              slaveFwState.updateInProgress = true;
+              slaveFwState.totalBlocksExpected = totalBlocks;
+              slaveFwState.currentBlockNum = 0u;
+              slaveFwState.packetsInCurrentBlock = 0u;
+              slaveFwState.writeAddress = FLASH_SLAVEOS_START_ADDR;
+              memset(slaveFwState.blockBuffer, 0xFF, sizeof(slaveFwState.blockBuffer));
+
+              responseData[0] = 0xFF;  // Статус: OK, готовы принимать пакеты
+            }
+            else
+            {
+              // Ошибка стирания или некорректное количество блоков
+              responseData[0] = 0u;  // Статус: ошибка
+              slaveFwState.updateInProgress = false;
+            }
+
+            // Отправляем ответ с тем же CAN ID (0x4E1) и статусом
+            CAN_SendSimpleFrame(&hcan1, CAN_MASSAGE_OK, responseData, 1u);
+
             break;
           }
 
-          /* ----------- ОС слейва: принять и сохранить данные ----------- */
+          /* ============================================================
+             ОБНОВЛЕНИЕ ОС SLAVE: ПРИЕМ ПАКЕТОВ (0x4E2)
+             ============================================================ */
           case CAN_SLAWE_OS:
           {
-            FW_HandleDataFrame(SLAVE_FW_BASE_ADDR, SLAVE_FW_SIZE, &slaveFwExpectedPacket, CanlocalData, dataLength);
+            // Передаем пакет в обработчик
+            FW_HandleDataPacket(&slaveFwState, CanlocalData, dataLength);
             break;
           }
 
-          /* ----------- Наша ОС (master): стереть область и подтвердить ----------- */
+          /* ============================================================
+             ОБНОВЛЕНИЕ ОС MASTER: НАЧАЛО (0x4E3 - для мастера!)
+             Примечание: у вас в can.h CAN_FLAG_OUR_OS = 0x4E3, это корректно
+             ============================================================ */
           case CAN_FLAG_OUR_OS:
           {
-            if (FLASH_EraseSectors(MASTER_FW_SECTOR_START, MASTER_FW_SECTOR_END) == HAL_OK)
+            // Извлекаем количество блоков
+            uint16_t totalBlocks = 0u;
+            if (dataLength >= 2u)
             {
-              masterFwExpectedPacket = 0u;
-              CAN_SendSimpleFrame(&hcan1, CAN_FLAG_OUR_OS, NULL, 0u);
+              totalBlocks = (uint16_t)((CanlocalData[0] << 8) | CanlocalData[1]);
             }
+
+            taskENTER_CRITICAL();
+            // Стираем секторы flash для нашей прошивки
+            HAL_StatusTypeDef eraseStatus = FLASH_EraseSectors(FLASH_MYOS_START_SECTOR, 
+                                                               FLASH_MYOS_END_SECTOR);
+
+            taskEXIT_CRITICAL();
+            
+            uint8_t responseData[1];
+
+            if (eraseStatus == HAL_OK && totalBlocks > 0u)
+            {
+              // Инициализируем процесс обновления master
+              memset(&masterFwState, 0, sizeof(masterFwState));
+              masterFwState.updateInProgress = true;
+              masterFwState.totalBlocksExpected = totalBlocks;
+              masterFwState.currentBlockNum = 0u;
+              masterFwState.packetsInCurrentBlock = 0u;
+              masterFwState.writeAddress = FLASH_MYOS_START_ADDR;
+              memset(masterFwState.blockBuffer, 0xFF, sizeof(masterFwState.blockBuffer));
+
+              responseData[0] = 0xFF;  // OK
+            }
+            else
+            {
+              responseData[0] = 0u;  // Ошибка
+              masterFwState.updateInProgress = false;
+            }
+
+            // Отправляем ответ
+            CAN_SendSimpleFrame(&hcan1, CAN_MASSAGE_OK, responseData, 1u);
+
             break;
           }
 
-          /* ----------- Наша ОС (master): принять и сохранить данные ----------- */
+          /* ============================================================
+             ОБНОВЛЕНИЕ ОС MASTER: ПРИЕМ ПАКЕТОВ (0x4E4)
+             ============================================================ */
           case CAN_OUR_OS:
           {
-            FW_HandleDataFrame(MASTER_FW_BASE_ADDR, MASTER_FW_SIZE, &masterFwExpectedPacket, CanlocalData, dataLength);
+            FW_HandleDataPacket(&masterFwState, CanlocalData, dataLength);
             break;
           }
             
@@ -791,6 +892,26 @@ void StartTask03(void const * argument)
   /* USER CODE END StartTask03 */
 }
 
+/* USER CODE BEGIN Header_StartTask03 */
+/**
+* @brief Function implementing the myTask04 thread.
+* @param 
+* @retval 
+*/
+/* USER CODE END Header_StartTask02 */
+void StartTask04(void const * argument)
+{
+  /* USER CODE BEGIN StartTask02 */
+
+
+
+  for(;;)
+  {
+      
+  }
+}
+
+
 /**
   * @brief  Period elapsed callback in non blocking mode
   * @note   This function is called  when TIM1 interrupt took place, inside
@@ -888,44 +1009,215 @@ HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress,
     return status;
 }
 
-/* Обработка кадра с данными прошивки (общая для нашей ОС и ОС слейва) */
-static void FW_HandleDataFrame(uint32_t baseAddress,
-                               uint32_t areaSize,
-                               uint16_t *expectedPacketIdx,
-                               const uint8_t *canData,
-                               uint8_t dataLength)
+
+
+/**
+ * @brief Обработка одного пакета с данными прошивки
+ * @param state: указатель на структуру состояния обновления (slave или master)
+ * @param canData: массив данных из CAN-кадра: [index_hi][index_lo][data0]...[data5]
+ * @param dataLength: длина данных в CAN-кадре (обычно 8)
+ * 
+ * Формат пакета:
+ *   canData[0-1]: глобальный индекс пакета (big-endian)
+ *   canData[2-7]: до 6 байт данных прошивки
+ */
+static void FW_HandleDataPacket(FirmwareUpdateState_t *state, 
+                                const uint8_t *canData, 
+                                uint8_t dataLength)
 {
-    /* Ожидаем минимум 2 байта индекса и ≥1 байт данных */
-    if (canData == NULL || dataLength < 3u)
+    // Проверки корректности
+    if (!state || !canData || dataLength < 3u)
     {
-        return;
+        return;  // Некорректные данные
     }
 
-    uint16_t packetIdx = (uint16_t)((canData[0] << 8) | canData[1]);
+    if (!state->updateInProgress)
+    {
+        return;  // Обновление не инициализировано
+    }
+
+    // Извлекаем глобальный индекс пакета (первые 2 байта)
+    uint16_t globalPacketIndex = (uint16_t)((canData[0] << 8) | canData[1]);
+
+    // Данные прошивки начинаются с 3-го байта
     const uint8_t *payload = &canData[2];
-    uint8_t payloadLen = (uint8_t)(dataLength - 2u);
+    uint8_t payloadLen = (dataLength >= 2u) ? (dataLength - 2u) : 0u;
 
-    /* Можно проверять порядок пакетов (опционально) */
-    if (packetIdx != *expectedPacketIdx)
+    // Ограничиваем размер данных
+    if (payloadLen > FW_PACKET_DATA_SIZE)
     {
-        /* Если порядок критичен – можно просто return или
-           сбросить приём, как решишь. Сейчас принимаем как есть. */
-        *expectedPacketIdx = packetIdx;
+        payloadLen = FW_PACKET_DATA_SIZE;
     }
 
-    uint32_t offset = (uint32_t)packetIdx * FW_CAN_CHUNK_MAX_BYTES;
+    // Вычисляем номер блока и позицию пакета в блоке из глобального индекса
+    uint16_t calculatedBlockNum = globalPacketIndex / FW_BLOCK_SIZE_PACKETS;
+    uint8_t packetNumInBlock = globalPacketIndex % FW_BLOCK_SIZE_PACKETS;
 
-    /* Защита от выхода за пределы области */
-    if ((offset + payloadLen) > areaSize)
+    // Проверка последовательности (опционально, можно закомментировать)
+    // Если пришел пакет не из текущего блока - начинаем новый блок
+    if (calculatedBlockNum != state->currentBlockNum)
     {
-        return;
+        // Сбрасываем текущий блок и переходим к новому
+        state->currentBlockNum = calculatedBlockNum;
+        state->packetsInCurrentBlock = 0u;
+        memset(state->blockBuffer, 0xFF, sizeof(state->blockBuffer));  // Заполняем 0xFF на случай неполного блока
     }
 
-    uint32_t writeAddress = baseAddress + offset;
+    // Копируем данные пакета в буфер блока
+    uint8_t offsetInBuffer = packetNumInBlock * FW_PACKET_DATA_SIZE;
+    if ((offsetInBuffer + payloadLen) <= FW_BLOCK_SIZE_BYTES)
+    {
+        memcpy(&state->blockBuffer[offsetInBuffer], payload, payloadLen);
+    }
 
-    (void)FLASH_WriteBuffer(writeAddress, payload, payloadLen);
+    // Обновляем счетчик принятых пакетов
+    if (packetNumInBlock >= state->packetsInCurrentBlock)
+    {
+        state->packetsInCurrentBlock = packetNumInBlock + 1u;
+    }
 
-    (*expectedPacketIdx)++;
+    // Проверяем, собран ли блок полностью
+    bool blockComplete = (state->packetsInCurrentBlock >= FW_BLOCK_SIZE_PACKETS);
+
+    // Проверяем, это последний блок?
+    bool isLastBlock = (state->currentBlockNum >= (state->totalBlocksExpected - 1u));
+
+    // Если блок собран полностью ИЛИ это последний блок и пришли все пакеты
+    if (blockComplete)
+    {
+        // Вычисляем количество байт для записи
+        uint32_t bytesToWrite = state->packetsInCurrentBlock * FW_PACKET_DATA_SIZE;
+
+        // Записываем блок во flash
+        HAL_StatusTypeDef writeStatus = FLASH_WriteBuffer(state->writeAddress, 
+                                                           state->blockBuffer, 
+                                                           bytesToWrite);
+
+        // Формируем подтверждение: номер записанного блока
+        uint8_t ackData[2];
+        ackData[0] = (uint8_t)(state->currentBlockNum >> 8);
+        ackData[1] = (uint8_t)(state->currentBlockNum & 0xFFu);
+
+        // Отправляем подтверждение записи блока (CAN ID 0x4E3)
+        CAN_SendSimpleFrame(&hcan1, CAN_MASSAGE_OK, ackData, 2u);
+
+        // Переходим к следующему блоку
+        state->currentBlockNum++;
+        state->packetsInCurrentBlock = 0u;
+        state->writeAddress += bytesToWrite;
+
+        // Очищаем буфер для следующего блока
+        memset(state->blockBuffer, 0xFF, sizeof(state->blockBuffer));
+
+        // Если записали все блоки - завершаем обновление
+        if (state->currentBlockNum >= state->totalBlocksExpected)
+        {
+          
+          
+           if (state == &masterFwState)
+            {
+                // Обновление MASTER OS завершено
+                crc32 = compute_flash_myos_crc();
+                iar_crc32 = *(const uint32_t *)(FLASH_MYOS_END_ADDR - 3);
+                
+                // Проверка CRC
+                if (crc32 == iar_crc32)
+                {
+                    Set_Update_Flag();  // Устанавливаем флаг 0x1111
+                }
+          
+            }
+          
+          
+            //state->updateInProgress = false;
+            //crc32 = compute_flash_myos_crc();
+            //iar_crc32 = *(const uint32_t *)(FLASH_MYOS_END_ADDR - 3);
+        }
+    }
+}
+ 
+
+const uint16_t __attribute__((used)) lookup_table[256] = {
+    0x0000, 0x0324, 0x0648, 0x096A, 0x0C8B, 0x0FAB, 0x12C8, 0x15E2,
+    0x18F8, 0x1C0B, 0x1F19, 0x2223, 0x2528, 0x2826, 0x2B1F, 0x2E11,
+    0x30FB, 0x33DE, 0x36BA, 0x398C, 0x3C56, 0x3F17, 0x41CE, 0x447A,
+    0x471C, 0x49B4, 0x4C3F, 0x4EBF, 0x5133, 0x539B, 0x55F5, 0x5842,
+    // ... повтори или сгенерируй 256 значений
+    0x5A82, 0x5CB4, 0x5ED7, 0x60EC, 0x62F2, 0x64E8, 0x66CF, 0x68A6,
+    0x6A6D, 0x6C24, 0x6DCA, 0x6F5F, 0x70E2, 0x7255, 0x73B5, 0x7504,
+    0x7641, 0x776C, 0x7884, 0x798A, 0x7A7D, 0x7B5D, 0x7C29, 0x7CE3,
+    0x7D8A, 0x7E1D, 0x7E9D, 0x7F09, 0x7F62, 0x7FA7, 0x7FD8, 0x7FF6
+    // Дополни остальными значениями...
+};
+
+
+
+uint32_t compute_flash_myos_crc(void) 
+{
+
+    static uint32_t crc32_table[256] = {0};
+    static uint8_t table_initialized = 0;
+
+    if (!table_initialized) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t crc = i << 24;
+            for (uint8_t j = 0; j < 8; j++) {
+                if (crc & 0x80000000UL) {
+                    crc = (crc << 1) ^ 0x04C11DB7UL;
+                } else {
+                    crc <<= 1;
+                }
+            }
+            crc32_table[i] = crc;
+        }
+        table_initialized = 1;
+    }
+
+    uint32_t crc = 0xFFFFFFFFUL;
+    const uint8_t *data = (const uint8_t *)FLASH_MYOS_START_ADDR;
+    uint32_t length = FLASH_MYOS_SIZE - 4;
+
+    while (length--) {
+        crc = crc32_table[(crc >> 24) ^ *data++] ^ (crc << 8);
+    }
+
+    return crc;
+}
+
+
+/**
+  * @brief  Устанавливает флаг обновления прошивки (0x1111)
+  * @retval HAL_OK если успешно
+  */
+HAL_StatusTypeDef Set_Update_Flag(void)
+{
+    HAL_StatusTypeDef status;
+    FLASH_EraseInitTypeDef EraseInitStruct;
+    uint32_t SectorError = 0;
+
+    HAL_FLASH_Unlock();
+
+    // 1. Стираем сектор с флагом (Sector 12), чтобы гарантировать чистоту перед записью
+    EraseInitStruct.TypeErase    = FLASH_TYPEERASE_SECTORS;
+    EraseInitStruct.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+    EraseInitStruct.Sector       = FLASH_UPDATE_FLAG_SECTOR;
+    EraseInitStruct.NbSectors    = 1;
+
+    status = HAL_FLASHEx_Erase(&EraseInitStruct, &SectorError);
+    if (status != HAL_OK)
+    {
+        HAL_FLASH_Lock();
+        return status;
+    }
+
+    // 2. Записываем флаг 0x1111
+    // Адрес должен быть выровнен, 0x08100000UL выровнен
+    status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_UPDATE_FLAG_ADDR, 0x00001111);
+
+    HAL_FLASH_Lock();
+    
+    HAL_NVIC_SystemReset();
+    //return status;
 }
 
 

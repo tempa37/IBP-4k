@@ -63,11 +63,15 @@ typedef struct {
 #define CAN_WRITE_B3        0x4F3U
 #define CAN_WRITE_B4        0x4F4U
 
-#define CAN_FLAG_SLAWE_OS  0x4E1U
-#define CAN_SLAWE_OS       0x4E2U
+#define CAN_FLAG_SLAWE_OS  0x4E1U //говорит о том, что нужно стереть сектора для слейв прошивки + data(количество будущих пакетов)
+#define CAN_SLAWE_OS       0x4E2U //говорит о том, что пришел пакет с прошивкой слейва + index (data0 + data1)
 
-#define CAN_FLAG_OUR_OS  0x4E3U
-#define CAN_OUR_OS       0x4E4U
+
+#define CAN_FLAG_OUR_OS  0x4E4U //говорит о том, что нужно стереть сектора для своей прошивки + data(количество будущих пакетов)
+#define CAN_OUR_OS       0x4E5U //говорит о том, что пришел пакет с нашей прошивкой + index (data0 + data1)
+
+
+#define CAN_MASSAGE_OK       0x4E3U //этот флаг отсылаем мы, говорит о том что блок с прошивкой получен (+data0 = 0/1)
 
 /* Глобальные переменные CAN */
 extern CanContext_t canContext;

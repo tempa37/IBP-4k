@@ -121,6 +121,12 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
     {
         return;
     }
+    // ✅ Сохраняем данные так же, как в FIFO0
+    UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+    canContext.header = header;
+    memcpy(canContext.data, frameData, sizeof(frameData));
+    canContext.dataReady = true;
+    taskEXIT_CRITICAL_FROM_ISR(irqState);
 }
 
 /**
