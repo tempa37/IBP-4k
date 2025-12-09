@@ -5,13 +5,29 @@
 #include "modbuc.h"
 #include "uart.h"
 #include "slave_update_thread.h"
+
+
+
+
+
+//extern SlaveSystem_t slave = {0};
+
+
+
+
+
+
+
+
+
+
 /**
  * @brief Отправка данных слейву по UART с CRC16 (Modbus)
  * @param slave_num: номер слейва
  * @param data: указатель на данные
  * @param length: длина данных
  */
-static void Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, uint8_t length)
+void Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, uint8_t length)
 {
     if (slave_num >= UART_CHANNEL_COUNT) return;
     
@@ -30,7 +46,7 @@ static void Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, 
  * @param slave_num: номер слейва
  * @return true если ACK получен
  */
-static bool Slave_CheckACK(uint8_t slave_num)
+bool Slave_CheckACK(uint8_t slave_num)
 {
     if (slave_num >= UART_CHANNEL_COUNT) return false;
     
@@ -48,7 +64,7 @@ static bool Slave_CheckACK(uint8_t slave_num)
  * @brief Переход к следующему блоку данных
  * @param ctx: указатель на контекст обновления
  */
-static void Slave_NextDataBlock(SlaveUpdateContext_t *ctx)
+void Slave_NextDataBlock(SlaveUpdateContext_t *ctx)
 {
     uint32_t bytes_remaining = ctx->total_bytes - ctx->bytes_written;
     
@@ -76,7 +92,7 @@ static void Slave_NextDataBlock(SlaveUpdateContext_t *ctx)
  * @brief Основная функция обработки обновления слейва (запускается в Task04)
  * Вызывается периодически из StartTask04
  */
-static void Slave_UpdateProcess(void)
+void Slave_UpdateProcess(void)
 {
     uint32_t current_tick = HAL_GetTick();
     
@@ -135,7 +151,7 @@ static void Slave_UpdateProcess(void)
                 modbus_cmd[4] = 0x12;              // Value (high byte) = 0x1234
                 modbus_cmd[5] = 0x34;              // Value (low byte)
                 // Добавляем CRC16
-                uint16_t crc = Modbus_CRC16(modbus_cmd, 6);
+                uint16_t crc = Modbus_CalculateCRC(modbus_cmd, 6);
                 modbus_cmd[6] = crc & 0xFF;
                 modbus_cmd[7] = (crc >> 8) & 0xFF;
                 
@@ -440,22 +456,3 @@ static void Slave_UpdateProcess(void)
     }
 }
 
-/**
- * @brief Функция Task04 - обновление прошивки слейвов
- * Вызывается из StartTask04 периодически (например, каждые 10-50ms)
- */
-void StartTask04(void const * argument)
-{
-    /* USER CODE BEGIN StartTask04 */
-    
-    for (;;)
-    {
-        // Основной обработчик процесса обновления slave
-        Slave_UpdateProcess();
-        
-        // Задержка для других задач
-        osDelay(50);
-    }
-    
-    /* USER CODE END StartTask04 */
-}

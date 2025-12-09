@@ -70,7 +70,18 @@ static SlaveUpdateContext_t slave_update_ctx[UART_CHANNEL_COUNT] = {0};
 #define SLAVE_OS_SIZE               0x8000u   // 32 KB
 
 
+typedef struct {
+    volatile uint8_t ack;
+    volatile uint8_t need_update;
+} SlaveDevice_t;
 
+typedef struct {
+    SlaveDevice_t device[UART_CHANNEL_COUNT];
+    volatile uint8_t os_in_flash;
+} SlaveSystem_t;
+
+/* Глобальная переменная, определена в main.c */
+extern SlaveSystem_t slave;
 
 /* Определяем константы для bootloader протокола */
 #define BOOTLOADER_ACK              0x79u
@@ -84,3 +95,8 @@ static SlaveUpdateContext_t slave_update_ctx[UART_CHANNEL_COUNT] = {0};
 #define BOOTLOADER_WRITE_CONFIRM    0xCEu
 
 
+
+void Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, uint8_t length);
+bool Slave_CheckACK(uint8_t slave_num);
+void Slave_NextDataBlock(SlaveUpdateContext_t *ctx);
+void Slave_UpdateProcess(void);

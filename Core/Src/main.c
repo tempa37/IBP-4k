@@ -149,7 +149,7 @@ HAL_StatusTypeDef Set_Update_Flag(void);
 
 
 
-
+/*
 typedef struct {
     volatile uint8_t ack;
     volatile uint8_t need_update;
@@ -159,7 +159,7 @@ typedef struct {
     SlaveDevice_t device[UART_CHANNEL_COUNT];
     volatile uint8_t os_in_flash;  
 } SlaveSystem_t;
-
+*/
 SlaveSystem_t slave = {0};
 
 
@@ -997,7 +997,11 @@ void StartTask04(void const * argument)
 
   for(;;)
   {
-      
+        // Основной обработчик процесса обновления slave
+        Slave_UpdateProcess();
+        
+        // Задержка для других задач
+        osDelay(50);
   }
 }
 

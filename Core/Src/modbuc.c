@@ -13,7 +13,7 @@ extern UART_HandleTypeDef huart8;
 
 
 /* Локальная функция для расчёта контрольной суммы Modbus CRC16 */
-static uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length)
+uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length)
 {
   uint16_t crc = 0xFFFFu;
 
