@@ -42,7 +42,7 @@ define region FLASH_UNUSED_region = mem:[from 0x080C0000 to 0x0811FFFF];
 define region FLASH_MYOS_region   = mem:[from 0x08120000 to 0x0813FFFF];
 
 /* 5. slaveOS 0x081A 0000 - 0x081F FFFF (384 KB) */
-define region FLASH_SLAVEOS_region = mem:[from 0x081A0000 to 0x081FFFFF];
+define region FLASH_SLAVEOS_region = mem:[from 0x081A0000 to 0x081BFFFF];
 
 /* Вектор прерываний по-прежнему в начале bootloader */
 place at address mem:__ICFEDIT_intvec_start__ { readonly section .intvec };

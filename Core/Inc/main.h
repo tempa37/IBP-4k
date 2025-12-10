@@ -97,15 +97,15 @@ extern "C" {
 #define FLASH_MYOS_SECTOR_COUNT   4
 
 // ============================================================================
-// 5. slaveOS REGION (384 KB)
-// Sectors: 21, 22, 23 (128K each)
+// 5. slaveOS REGION (128 KB)
+// Sectors: 21(128K each)
 // ============================================================================
 #define FLASH_SLAVEOS_START_ADDR  0x081A0000UL
-#define FLASH_SLAVEOS_END_ADDR    0x081FFFFFUL
+#define FLASH_SLAVEOS_END_ADDR    0x081BFFFFUL
 #define FLASH_SLAVEOS_SIZE        (FLASH_SLAVEOS_END_ADDR - FLASH_SLAVEOS_START_ADDR + 1)
 #define FLASH_SLAVEOS_START_SECTOR FLASH_SECTOR_21
-#define FLASH_SLAVEOS_END_SECTOR   FLASH_SECTOR_23
-#define FLASH_SLAVEOS_SECTOR_COUNT 3
+#define FLASH_SLAVEOS_END_SECTOR   FLASH_SECTOR_21
+#define FLASH_SLAVEOS_SECTOR_COUNT 1
 
 #define FLASH_UPDATE_FLAG_ADDR 0x08100000UL
 #define FLASH_UPDATE_FLAG_SECTOR FLASH_SECTOR_12
