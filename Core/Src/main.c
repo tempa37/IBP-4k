@@ -142,8 +142,7 @@ uint32_t compute_flash_myos_crc(void);
 
 
 HAL_StatusTypeDef Set_Update_Flag(void);
-
-
+void CheckConnectionTimeout(void);
 
 
 
@@ -270,7 +269,7 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128); //1280
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 1280); //1280
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of myTask02 */
@@ -282,7 +281,7 @@ int main(void)
   WDI_TaskHandle = osThreadCreate(osThread(WDI_Task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  osThreadDef(myTask04, StartTask04, osPriorityIdle, 0, 128);
+  osThreadDef(myTask04, StartTask04, osPriorityIdle, 0, 512);
   myTask02Handle = osThreadCreate(osThread(myTask04), NULL);
   /* USER CODE END RTOS_THREADS */
 
@@ -320,7 +319,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 6;
   RCC_OscInitStruct.PLL.PLLN = 180;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;  //RCC_PLLP_DIV2 = 180
   RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -931,7 +930,7 @@ void StartTask02(void const * argument)
         BAT_UpdateAllIndicators();  // Обновление индикаторов (LED)
       }
       
-      
+      }
       
       /* Периодическая генерация Modbus-запросов к каждому из UART-устройств */
       if ((currentTick - modbusLastPollTick[index]) >= modbusPollIntervalMs)
@@ -951,7 +950,7 @@ void StartTask02(void const * argument)
         }
         modbusLastPollTick[index] = currentTick;
       }
-    }
+    
 #endif
 
     /* Небольшая пауза, чтобы освободить процессор другим задачам */
@@ -960,6 +959,8 @@ void StartTask02(void const * argument)
   }
   /* USER CODE END StartTask02 */
 }
+
+uint32_t wdi_tick = 0;
 
 /* USER CODE BEGIN Header_StartTask03 */
 /**
@@ -978,6 +979,8 @@ void StartTask03(void const * argument)
     osDelay(100);
     HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_RESET);
     osDelay(100);
+    CheckConnectionTimeout(); //гасим LED
+    wdi_tick++;
   }
   /* USER CODE END StartTask03 */
 }
@@ -1316,5 +1319,28 @@ HAL_StatusTypeDef Set_Update_Flag(void)
     HAL_NVIC_SystemReset();
     //return status;
 }
+
+/**
+ * @brief Проверка таймаута соединения со слейвами.
+ * Если данных не было более 4 секунд, сбрасывает флаг valid и гасит LED.
+ */
+void CheckConnectionTimeout(void)
+{
+    const uint32_t TIMEOUT_MS = 4000;
+    uint32_t currentTick = HAL_GetTick();
+
+    for (uint8_t i = 0; i < UART_CHANNEL_COUNT; i++)
+    {
+        // Работаем только если флаг сейчас установлен 
+        if (modbusSlaveData[i].valid)
+        
+            if ((currentTick - modbusSlaveData[i].last_update_tick) > TIMEOUT_MS)
+            {
+                modbusSlaveData[i].valid = false; // Сбрасываем флаг "связь есть"
+                BAT_SetIndicator(i);              // гасим индикатор для этого канала
+            }
+        }
+  }
+
 
 //------------------------------------------------------------------------------

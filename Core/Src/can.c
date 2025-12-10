@@ -23,7 +23,7 @@ void MX_CAN1_Init(void)
     HAL_Delay(10);
 
     hcan1.Instance = CAN1;
-    hcan1.Init.Prescaler = 10;
+    hcan1.Init.Prescaler = 5; //10 при 180мгц
     hcan1.Init.Mode = CAN_MODE_NORMAL;
     hcan1.Init.SyncJumpWidth = CAN_SJW_2TQ;
     hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
