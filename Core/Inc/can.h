@@ -34,7 +34,7 @@ typedef struct {
     uint16_t ship_mode;
     uint16_t capacity_mah;
     uint16_t soc_percent;
-    uint16_t eeprom_addr_low;
+    uint16_t calibration_active_flag;
     uint16_t error_flags;
     uint16_t firmware_version;
     int16_t  pack_current_raw_ma;
@@ -44,6 +44,8 @@ typedef struct {
     int16_t  ina_curr_cal_y[2];
     uint16_t ina_volt_cal_x[2];
     uint16_t ina_volt_cal_y[2];
+    uint16_t nominal_capacity_mah;
+    uint16_t bq_coulomb_count_mah;
     bool     valid;
     uint32_t last_update_tick;
     uint8_t  slave_id;

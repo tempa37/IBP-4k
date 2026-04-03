@@ -11,6 +11,11 @@ uint8_t uart8_err = 0;
 uint8_t uart7_err = 0;
 uint8_t uart4_err = 0;
 uint8_t uart5_err = 0;
+volatile uint32_t uart_debug_error_state = 0u;
+volatile uint32_t uart_debug_error_sr = 0u;
+volatile uint32_t uart_debug_error_dr = 0u;
+volatile uint32_t uart_debug_error_count = 0u;
+volatile uint8_t uart_debug_error_uart = 0xFFu;
 
 
 /* Конфигурация UART */
@@ -133,6 +138,15 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     UartContext_t *context = Uart_GetContext(huart);
     if (!context) return;
+    uart_debug_error_state = huart->ErrorCode;
+    uart_debug_error_sr = huart->Instance->SR;
+    uart_debug_error_dr = huart->Instance->DR;
+    uart_debug_error_count++;
+    if (huart == &huart8) uart_debug_error_uart = 8u;
+    else if (huart == &huart7) uart_debug_error_uart = 7u;
+    else if (huart == &huart4) uart_debug_error_uart = 4u;
+    else if (huart == &huart5) uart_debug_error_uart = 5u;
+    else uart_debug_error_uart = 0u;
 
     // Сохраняем код ошибки
     context->errorCode = huart->ErrorCode;

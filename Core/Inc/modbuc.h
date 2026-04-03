@@ -16,7 +16,8 @@ extern "C" {
 #define MODBUS_DEFAULT_SLAVE_ADDRESS     (0x01u)
 
 /* Количество регистров, запрашиваемых от Modbus-устройства */
-#define MODBUS_REGISTER_COUNT            (0x25u)
+#define MODBUS_REGISTER_COUNT            (0x27u)
+#define MODBUS_REGISTER_BYTE_COUNT       (MODBUS_REGISTER_COUNT * 2u)
 
   
 #define MODBUS_SLAVE_ID 0x01   
@@ -31,6 +32,8 @@ typedef struct
   uint8_t response[MODBUS_MAX_FRAME_SIZE];  /* Буфер с последним полученным ответом */
   size_t responseLength;                    /* Длина последнего ответа */
 } ModbusChannelBuffer_t;
+
+uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length);
 
 
 /* USER CODE BEGIN Private defines */

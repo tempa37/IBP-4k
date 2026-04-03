@@ -53,6 +53,11 @@ extern uint8_t uart8_err;
 extern uint8_t uart7_err;
 extern uint8_t uart4_err;
 extern uint8_t uart5_err;
+extern volatile uint32_t uart_debug_error_state;
+extern volatile uint32_t uart_debug_error_sr;
+extern volatile uint32_t uart_debug_error_dr;
+extern volatile uint32_t uart_debug_error_count;
+extern volatile uint8_t uart_debug_error_uart;
 
 /* Функции UART */
 void UART_Init(void);

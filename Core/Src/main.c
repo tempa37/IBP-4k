@@ -453,14 +453,21 @@ static void MX_GPIO_Init(void)
  */
 bool ParseModbusResponse(const uint8_t *response, size_t length, ModbusSlaveData_t *data_out)
 {
-    if (!response || !data_out || length < 5) return false;
+    if (!response || !data_out || length < 5u) return false;
+
+    uint16_t expected_crc = Modbus_CalculateCRC(response, length - 2u);
+    uint16_t received_crc = (uint16_t)response[length - 2u] |
+                            ((uint16_t)response[length - 1u] << 8);
+
+    if (expected_crc != received_crc) return false;
 
     // Проверка: Slave ID, Function Code, Byte Count
     uint8_t slave_id = response[0];
     uint8_t func     = response[1];
     uint8_t byte_cnt = response[2];
 
-    if (func != 0x03 || byte_cnt != 74) return false;
+    if (func != 0x03 || byte_cnt != MODBUS_REGISTER_BYTE_COUNT) return false;
+    if (length != ((size_t)byte_cnt + 5u)) return false;
 
     const uint8_t *payload = &response[3];  // Данные начинаются после byte count
 
@@ -488,7 +495,7 @@ bool ParseModbusResponse(const uint8_t *response, size_t length, ModbusSlaveData
     data_out->ship_mode            = READ_REG(18);
     data_out->capacity_mah         = READ_REG(19);
     data_out->soc_percent          = READ_REG(20);
-    data_out->eeprom_addr_low      = READ_REG(21);
+    data_out->calibration_active_flag = READ_REG(21);
     data_out->error_flags          = READ_REG(22);
     data_out->firmware_version     = READ_REG(23);
     data_out->pack_current_raw_ma  = (int16_t)READ_REG(24);
@@ -507,6 +514,8 @@ bool ParseModbusResponse(const uint8_t *response, size_t length, ModbusSlaveData
     data_out->ina_volt_cal_x[1]    = READ_REG(34);
     data_out->ina_volt_cal_y[0]    = READ_REG(35);
     data_out->ina_volt_cal_y[1]    = READ_REG(36);
+    data_out->nominal_capacity_mah = READ_REG(37);
+    data_out->bq_coulomb_count_mah = READ_REG(38);
 
     #undef READ_REG
 

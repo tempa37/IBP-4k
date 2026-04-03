@@ -1,4 +1,5 @@
 #include "can.h"
+#include "modbuc.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -173,7 +174,7 @@ size_t SerializeModbusData(const ModbusSlaveData_t *data_in, uint8_t *buffer_out
     WRITE_REG_CAN(data_in->ship_mode);
     WRITE_REG_CAN(data_in->capacity_mah);
     WRITE_REG_CAN(data_in->soc_percent);
-    WRITE_REG_CAN(data_in->eeprom_addr_low);
+    WRITE_REG_CAN(data_in->calibration_active_flag);
     WRITE_REG_CAN(data_in->error_flags);
     WRITE_REG_CAN(data_in->firmware_version);
     WRITE_REG_CAN((uint16_t)data_in->pack_current_raw_ma);
@@ -189,6 +190,8 @@ size_t SerializeModbusData(const ModbusSlaveData_t *data_in, uint8_t *buffer_out
     WRITE_REG_CAN(data_in->ina_volt_cal_x[1]);
     WRITE_REG_CAN(data_in->ina_volt_cal_y[0]);
     WRITE_REG_CAN(data_in->ina_volt_cal_y[1]);
+    WRITE_REG_CAN(data_in->nominal_capacity_mah);
+    WRITE_REG_CAN(data_in->bq_coulomb_count_mah);
     
     return idx;
 }
@@ -203,7 +206,7 @@ void SendBatteryDataToCAN(uint8_t block_index, CAN_HandleTypeDef *hcan)
     
     if (block_index >= 4 || !modbusSlaveData[block_index].valid) return;
     
-    uint8_t serialized_buffer[74] = {0};
+    uint8_t serialized_buffer[MODBUS_REGISTER_BYTE_COUNT] = {0};
     size_t data_size = SerializeModbusData(&modbusSlaveData[block_index], serialized_buffer);
     if (data_size == 0) return;
     
