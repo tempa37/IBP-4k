@@ -120,6 +120,10 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+extern volatile uint8_t ips1_in;
+extern volatile uint8_t ips2_in;
+extern volatile uint8_t ips3_in;
+extern volatile uint8_t ips4_in;
 
 /* USER CODE END EFP */
 
@@ -134,6 +138,14 @@ void Error_Handler(void);
 #define BAT_2_GPIO_Port GPIOB
 #define BAT_1_Pin GPIO_PIN_8
 #define BAT_1_GPIO_Port GPIOD
+#define IPS_4_Pin GPIO_PIN_9
+#define IPS_4_GPIO_Port GPIOD
+#define IPS_3_Pin GPIO_PIN_10
+#define IPS_3_GPIO_Port GPIOD
+#define IPS_2_Pin GPIO_PIN_11
+#define IPS_2_GPIO_Port GPIOD
+#define IPS_1_Pin GPIO_PIN_12
+#define IPS_1_GPIO_Port GPIOD
 #define EN_4_Pin GPIO_PIN_3
 #define EN_4_GPIO_Port GPIOG
 #define EN_3_Pin GPIO_PIN_4

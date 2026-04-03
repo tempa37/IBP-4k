@@ -78,6 +78,10 @@ volatile uint16_t lastProcessedCanId = 0u;
 volatile uint8_t lastProcessedCanDlc = 0u;
 volatile uint32_t lastProcessedUartError = 0u;
 volatile uint32_t lastProcessedCanError = 0u;
+volatile uint8_t ips1_in = 0u;
+volatile uint8_t ips2_in = 0u;
+volatile uint8_t ips3_in = 0u;
+volatile uint8_t ips4_in = 0u;
 
 /* Буферы для хранения Modbus-запросов и ответов по каждому UART */
 static ModbusChannelBuffer_t modbusBuffers[UART_CHANNEL_COUNT] = {0};
@@ -426,6 +430,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(BAT_1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : IPS_4_Pin IPS_3_Pin IPS_2_Pin IPS_1_Pin */
+  GPIO_InitStruct.Pin = IPS_4_Pin|IPS_3_Pin|IPS_2_Pin|IPS_1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
   /*Configure GPIO pins : EN_4_Pin EN_3_Pin EN_2_Pin EN_1_Pin */
   GPIO_InitStruct.Pin = EN_4_Pin|EN_3_Pin|EN_2_Pin|EN_1_Pin;
@@ -981,6 +991,13 @@ uint32_t wdi_tick = 0;
 void StartTask03(void const * argument)
 {
   /* USER CODE BEGIN StartTask03 */
+  uint32_t lastIpsPollTick = 0u;
+
+  ips1_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_1_GPIO_Port, IPS_1_Pin) == GPIO_PIN_SET);
+  ips2_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_2_GPIO_Port, IPS_2_Pin) == GPIO_PIN_SET);
+  ips3_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_3_GPIO_Port, IPS_3_Pin) == GPIO_PIN_SET);
+  ips4_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_4_GPIO_Port, IPS_4_Pin) == GPIO_PIN_SET);
+  lastIpsPollTick = HAL_GetTick();
 
   for(;;)
   {
@@ -990,6 +1007,16 @@ void StartTask03(void const * argument)
     osDelay(100);
     CheckConnectionTimeout(); //гасим LED
     wdi_tick++;
+
+    uint32_t currentTick = HAL_GetTick();
+    if ((currentTick - lastIpsPollTick) >= 1000u)
+    {
+      ips1_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_1_GPIO_Port, IPS_1_Pin) == GPIO_PIN_SET);
+      ips2_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_2_GPIO_Port, IPS_2_Pin) == GPIO_PIN_SET);
+      ips3_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_3_GPIO_Port, IPS_3_Pin) == GPIO_PIN_SET);
+      ips4_in = (uint8_t)(HAL_GPIO_ReadPin(IPS_4_GPIO_Port, IPS_4_Pin) == GPIO_PIN_SET);
+      lastIpsPollTick = currentTick;
+    }
   }
   /* USER CODE END StartTask03 */
 }
