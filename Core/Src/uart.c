@@ -93,7 +93,8 @@ void Uart_StartReception(UartContext_t *context)
     {
         context->errorDetected = true;
         context->errorCode = context->handle->ErrorCode;
-        HAL_UART_ErrorCallback(context->handle);
+        context->reinit_needed = true;
+        context->dataReady = false;
     }
 }
 
