@@ -1,30 +1,431 @@
 #include "can.h"
-#include "modbuc.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
-/* Глобальные переменные CAN */
 CanContext_t canContext = {0};
 uint8_t CanlocalData[8] = {0};
 
-/* Внешние переменные */
 extern CAN_HandleTypeDef hcan1;
+extern ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT];
+extern volatile uint32_t lastProcessedCanError;
 
-/* Определение мьютекса для CAN */
+static volatile uint16_t canBusOffCounter = 0u;
+static volatile uint16_t wdgResetCounter = 0u;
+static volatile uint16_t lastErrorTimestampHours = 0u;
+static volatile uint8_t lastErrorCode = 0u;
+
 osMutexDef(CANBufferMutex);
 
-/**
- * @brief CAN1 Initialization Function
- */
+static const uint16_t canRequestMsgIds[] =
+{
+    CAN_MSG_INA260_VOLTAGE,
+    CAN_MSG_INA260_CURRENT,
+    CAN_MSG_BAT_SOC,
+    CAN_MSG_BQ_STATUS,
+    CAN_MSG_ERROR_FLAGS,
+    CAN_MSG_UART_VERSION,
+    CAN_MSG_BAT_CAPACITY_MAH,
+    CAN_MSG_BAT_NOMINAL_CAP,
+    CAN_MSG_BQ_COULOMB_COUNT_MAH,
+    CAN_MSG_CAN_BUSOFF_COUNTER,
+    CAN_MSG_WDG_RESET_COUNTER,
+    CAN_MSG_LAST_ERROR_TIMESTAMP,
+    CAN_MSG_LAST_ERROR_CODE
+};
+
+static const uint16_t canFirmwareStdIds[] =
+{
+    CAN_FLAG_SLAWE_OS,
+    CAN_SLAWE_OS,
+    CAN_FLAG_OUR_OS,
+    CAN_OUR_OS,
+    CAN_SLAVE_UPDATE_START
+};
+
+static uint32_t CAN_FilterEncodeExtendedId(uint32_t extId)
+{
+    return (extId << 3) | CAN_ID_EXT;
+}
+
+static uint32_t CAN_FilterEncodeStandardId(uint16_t stdId)
+{
+    return ((uint32_t)stdId << 21);
+}
+
+static HAL_StatusTypeDef CAN_ConfigFilterBank(uint8_t bank, uint32_t encodedId1, uint32_t encodedId2)
+{
+    CAN_FilterTypeDef filter = {0};
+
+    filter.FilterBank = bank;
+    filter.FilterMode = CAN_FILTERMODE_IDLIST;
+    filter.FilterScale = CAN_FILTERSCALE_32BIT;
+    filter.FilterIdHigh = (encodedId1 >> 16) & 0xFFFFu;
+    filter.FilterIdLow = encodedId1 & 0xFFFFu;
+    filter.FilterMaskIdHigh = (encodedId2 >> 16) & 0xFFFFu;
+    filter.FilterMaskIdLow = encodedId2 & 0xFFFFu;
+    filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+    filter.FilterActivation = ENABLE;
+    filter.SlaveStartFilterBank = 14;
+
+    return HAL_CAN_ConfigFilter(&hcan1, &filter);
+}
+
+static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
+{
+    uint32_t encodedIds[(sizeof(canRequestMsgIds) / sizeof(canRequestMsgIds[0])) +
+                        (sizeof(canFirmwareStdIds) / sizeof(canFirmwareStdIds[0]))] = {0};
+    size_t encodedCount = 0u;
+
+    for (size_t index = 0u; index < (sizeof(canRequestMsgIds) / sizeof(canRequestMsgIds[0])); ++index)
+    {
+        encodedIds[encodedCount++] = CAN_FilterEncodeExtendedId(
+            CAN_BuildExtId(CAN_NODE_KOU, CAN_NODE_IBP_4K, canRequestMsgIds[index], CAN_PRIORITY_DEFAULT));
+    }
+
+    for (size_t index = 0u; index < (sizeof(canFirmwareStdIds) / sizeof(canFirmwareStdIds[0])); ++index)
+    {
+        encodedIds[encodedCount++] = CAN_FilterEncodeStandardId(canFirmwareStdIds[index]);
+    }
+
+    for (size_t index = 0u, bank = 0u; index < encodedCount; index += 2u, ++bank)
+    {
+        uint32_t encodedId1 = encodedIds[index];
+        uint32_t encodedId2 = (index + 1u < encodedCount) ? encodedIds[index + 1u] : encodedIds[index];
+
+        if (CAN_ConfigFilterBank((uint8_t)bank, encodedId1, encodedId2) != HAL_OK)
+        {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
+}
+
+static void CAN_RecordErrorCode(uint8_t errorCodeValue);
+
+static void CAN_RecordStartupResetFlags(void)
+{
+    bool watchdogResetDetected = false;
+
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET)
+    {
+        watchdogResetDetected = true;
+    }
+
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) != RESET)
+    {
+        watchdogResetDetected = true;
+    }
+
+    if (watchdogResetDetected)
+    {
+        ++wdgResetCounter;
+        CAN_RecordErrorCode(0x02u);
+    }
+
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+}
+
+static void CAN_RecordErrorCode(uint8_t errorCodeValue)
+{
+    lastErrorCode = errorCodeValue;
+    lastErrorTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
+}
+
+static bool CAN_IsSupportedMsgId(uint16_t msgId)
+{
+    switch (msgId)
+    {
+        case CAN_MSG_INA260_VOLTAGE:
+        case CAN_MSG_INA260_CURRENT:
+        case CAN_MSG_BAT_SOC:
+        case CAN_MSG_BQ_STATUS:
+        case CAN_MSG_ERROR_FLAGS:
+        case CAN_MSG_UART_VERSION:
+        case CAN_MSG_BAT_CAPACITY_MAH:
+        case CAN_MSG_BAT_NOMINAL_CAP:
+        case CAN_MSG_BQ_COULOMB_COUNT_MAH:
+        case CAN_MSG_CAN_BUSOFF_COUNTER:
+        case CAN_MSG_WDG_RESET_COUNTER:
+        case CAN_MSG_LAST_ERROR_TIMESTAMP:
+        case CAN_MSG_LAST_ERROR_CODE:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static uint8_t CAN_ResponsePriorityForMsgId(uint16_t msgId)
+{
+    switch (msgId)
+    {
+        case CAN_MSG_CAN_BUSOFF_COUNTER:
+        case CAN_MSG_WDG_RESET_COUNTER:
+        case CAN_MSG_LAST_ERROR_TIMESTAMP:
+        case CAN_MSG_LAST_ERROR_CODE:
+            return CAN_PRIORITY_DIAGNOSTIC;
+
+        default:
+            return CAN_PRIORITY_DEFAULT;
+    }
+}
+
+static void CAN_PackWordLE(uint8_t *dst, uint16_t value)
+{
+    if (dst == NULL)
+    {
+        return;
+    }
+
+    dst[0] = (uint8_t)(value & 0xFFu);
+    dst[1] = (uint8_t)(value >> 8);
+}
+
+static uint16_t CAN_GetBalanceDeltaMv(const ModbusSlaveData_t *data)
+{
+    uint16_t minCell = 0xFFFFu;
+    uint16_t maxCell = 0u;
+
+    if (data == NULL)
+    {
+        return 0u;
+    }
+
+    for (size_t index = 0u; index < 10u; ++index)
+    {
+        uint16_t cellMv = data->cell_voltage_mv[index];
+
+        if (cellMv < minCell)
+        {
+            minCell = cellMv;
+        }
+
+        if (cellMv > maxCell)
+        {
+            maxCell = cellMv;
+        }
+    }
+
+    return (uint16_t)(maxCell - minCell);
+}
+
+static uint16_t CAN_ComposeErrorFlags(uint8_t channelIndex)
+{
+    const ModbusSlaveData_t *data;
+    uint16_t flags = 0u;
+    uint16_t balanceDeltaMv;
+
+    if (channelIndex >= UART_CHANNEL_COUNT)
+    {
+        return CAN_ERROR_FLAG_COMM_ERROR;
+    }
+
+    data = &modbusSlaveData[channelIndex];
+    if (!data->valid)
+    {
+        return CAN_ERROR_FLAG_COMM_ERROR;
+    }
+
+    flags = (uint16_t)(data->error_flags & (CAN_ERROR_FLAG_BQ_ERROR | CAN_ERROR_FLAG_INA_ERROR));
+    balanceDeltaMv = CAN_GetBalanceDeltaMv(data);
+
+    if (balanceDeltaMv >= CAN_BALANCE_WARNING_THRESHOLD_MV)
+    {
+        flags |= CAN_ERROR_FLAG_BALANCE_WARNING;
+    }
+
+    if (balanceDeltaMv > CAN_BALANCE_CRITICAL_THRESHOLD_MV)
+    {
+        flags |= CAN_ERROR_FLAG_BALANCE_CRITICAL;
+    }
+
+    return flags;
+}
+
+static uint16_t CAN_GetUnavailableWord(void)
+{
+    return 0xFFFFu;
+}
+
+static uint16_t CAN_GetRegisterResponseWord(uint8_t channelIndex, uint16_t msgId)
+{
+    const ModbusSlaveData_t *data;
+
+    if (channelIndex >= UART_CHANNEL_COUNT)
+    {
+        return (msgId == CAN_MSG_ERROR_FLAGS) ? CAN_ERROR_FLAG_COMM_ERROR : CAN_GetUnavailableWord();
+    }
+
+    if (msgId == CAN_MSG_ERROR_FLAGS)
+    {
+        return CAN_ComposeErrorFlags(channelIndex);
+    }
+
+    data = &modbusSlaveData[channelIndex];
+    if (!data->valid)
+    {
+        return CAN_GetUnavailableWord();
+    }
+
+    switch (msgId)
+    {
+        case CAN_MSG_INA260_VOLTAGE:
+            return data->voltage_mv;
+
+        case CAN_MSG_INA260_CURRENT:
+            return (uint16_t)data->current_ma;
+
+        case CAN_MSG_BAT_SOC:
+            return data->soc_percent;
+
+        case CAN_MSG_BQ_STATUS:
+            return data->bq_status_state_sys;
+
+        case CAN_MSG_UART_VERSION:
+            return data->firmware_version;
+
+        case CAN_MSG_BAT_CAPACITY_MAH:
+            return data->capacity_mah;
+
+        case CAN_MSG_BAT_NOMINAL_CAP:
+            return data->nominal_capacity_mah;
+
+        case CAN_MSG_BQ_COULOMB_COUNT_MAH:
+            return data->bq_coulomb_count_mah;
+
+        default:
+            return CAN_GetUnavailableWord();
+    }
+}
+
+static uint16_t CAN_GetDiagnosticWord(uint16_t msgId)
+{
+    switch (msgId)
+    {
+        case CAN_MSG_CAN_BUSOFF_COUNTER:
+            return canBusOffCounter;
+
+        case CAN_MSG_WDG_RESET_COUNTER:
+            return wdgResetCounter;
+
+        case CAN_MSG_LAST_ERROR_TIMESTAMP:
+            return lastErrorTimestampHours;
+
+        default:
+            return 0u;
+    }
+}
+
+static uint8_t CAN_GetResponseDlc(uint16_t msgId)
+{
+    return (msgId == CAN_MSG_LAST_ERROR_CODE) ? 4u : 8u;
+}
+
+static void CAN_BuildResponsePayload(uint16_t msgId, uint8_t payload[8])
+{
+    if (payload == NULL)
+    {
+        return;
+    }
+
+    memset(payload, 0, 8u);
+
+    if (msgId == CAN_MSG_LAST_ERROR_CODE)
+    {
+        for (size_t index = 0u; index < UART_CHANNEL_COUNT; ++index)
+        {
+            payload[index] = lastErrorCode;
+        }
+
+        return;
+    }
+
+    if ((msgId == CAN_MSG_CAN_BUSOFF_COUNTER) ||
+        (msgId == CAN_MSG_WDG_RESET_COUNTER) ||
+        (msgId == CAN_MSG_LAST_ERROR_TIMESTAMP))
+    {
+        uint16_t diagnosticValue = CAN_GetDiagnosticWord(msgId);
+
+        for (size_t index = 0u; index < UART_CHANNEL_COUNT; ++index)
+        {
+            CAN_PackWordLE(&payload[index * 2u], diagnosticValue);
+        }
+
+        return;
+    }
+
+    for (size_t index = 0u; index < UART_CHANNEL_COUNT; ++index)
+    {
+        uint16_t value = CAN_GetRegisterResponseWord((uint8_t)index, msgId);
+        CAN_PackWordLE(&payload[index * 2u], value);
+    }
+}
+
+static void CAN_SendFrame(CAN_HandleTypeDef *hcan,
+                          uint32_t id,
+                          uint32_t ide,
+                          const uint8_t *data,
+                          uint8_t dlc)
+{
+    CAN_TxHeaderTypeDef txHeader = {0};
+    uint32_t txMailbox = 0u;
+    uint8_t txData[8] = {0};
+
+    if (hcan == NULL)
+    {
+        return;
+    }
+
+    if (dlc > 8u)
+    {
+        dlc = 8u;
+    }
+
+    if ((data != NULL) && (dlc > 0u))
+    {
+        memcpy(txData, data, dlc);
+    }
+
+    txHeader.RTR = CAN_RTR_DATA;
+    txHeader.IDE = ide;
+    txHeader.DLC = dlc;
+    txHeader.TransmitGlobalTime = DISABLE;
+
+    if (ide == CAN_ID_EXT)
+    {
+        txHeader.ExtId = id;
+    }
+    else
+    {
+        txHeader.StdId = id;
+    }
+
+    if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
+    {
+        if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0u)
+        {
+            if (HAL_CAN_AddTxMessage(hcan, &txHeader, txData, &txMailbox) != HAL_OK)
+            {
+                lastProcessedCanError = hcan->ErrorCode;
+            }
+        }
+
+        osMutexRelease(canContext.mutex);
+    }
+}
+
 void MX_CAN1_Init(void)
 {
+    CAN_RecordStartupResetFlags();
+
     __HAL_RCC_CAN1_FORCE_RESET();
     HAL_Delay(10);
     __HAL_RCC_CAN1_RELEASE_RESET();
     HAL_Delay(10);
 
     hcan1.Instance = CAN1;
-    hcan1.Init.Prescaler = 5; //10 при 180мгц
+    hcan1.Init.Prescaler = 5;
     hcan1.Init.Mode = CAN_MODE_NORMAL;
     hcan1.Init.SyncJumpWidth = CAN_SJW_2TQ;
     hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
@@ -35,290 +436,199 @@ void MX_CAN1_Init(void)
     hcan1.Init.AutoRetransmission = ENABLE;
     hcan1.Init.ReceiveFifoLocked = DISABLE;
     hcan1.Init.TransmitFifoPriority = DISABLE;
-    
+
     if (HAL_CAN_Init(&hcan1) != HAL_OK)
     {
         Error_Handler();
     }
 
-    /* Создание мьютекса для буфера CAN */
     canContext.mutex = osMutexCreate(osMutex(CANBufferMutex));
     if (canContext.mutex == NULL)
     {
         Error_Handler();
     }
 
-    /* Настройка фильтра CAN и активация приёма */
-    CAN_FilterTypeDef canFilterConfig = {0};
-    canFilterConfig.FilterBank = 0;
-    canFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
-    canFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
-    canFilterConfig.FilterIdHigh = 0x0000;
-    canFilterConfig.FilterIdLow = 0x0000;
-    canFilterConfig.FilterMaskIdHigh = 0x0000;
-    canFilterConfig.FilterMaskIdLow = 0x0000;
-    canFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
-    canFilterConfig.FilterActivation = ENABLE;
-    canFilterConfig.SlaveStartFilterBank = 14;
-    
-    if (HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig) != HAL_OK)
+    if (CAN_ConfigHardwareFilters() != HAL_OK)
     {
         Error_Handler();
     }
-    
+
     if (HAL_CAN_Start(&hcan1) != HAL_OK)
     {
         Error_Handler();
     }
-    
-    if (HAL_CAN_ActivateNotification(&hcan1, 
-        CAN_IT_RX_FIFO0_MSG_PENDING |
-        CAN_IT_RX_FIFO1_MSG_PENDING |
-        CAN_IT_TX_MAILBOX_EMPTY |
-        CAN_IT_ERROR_WARNING |
-        CAN_IT_ERROR_PASSIVE |
-        CAN_IT_BUSOFF |
-        CAN_IT_LAST_ERROR_CODE |
-        CAN_IT_ERROR) != HAL_OK)
+
+    if (HAL_CAN_ActivateNotification(&hcan1,
+                                     CAN_IT_RX_FIFO0_MSG_PENDING |
+                                     CAN_IT_TX_MAILBOX_EMPTY |
+                                     CAN_IT_ERROR_WARNING |
+                                     CAN_IT_ERROR_PASSIVE |
+                                     CAN_IT_BUSOFF |
+                                     CAN_IT_LAST_ERROR_CODE |
+                                     CAN_IT_ERROR) != HAL_OK)
     {
         Error_Handler();
     }
 }
 
-/**
- * @brief Обработчик готовности сообщения CAN из FIFO0
- */
+uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priority)
+{
+    return (((uint32_t)src & 0x7Fu) |
+            (((uint32_t)dst & 0x7Fu) << 7) |
+            (((uint32_t)msgId & 0x03FFu) << 14) |
+            (((uint32_t)priority & 0x03u) << 27));
+}
+
+bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId, uint8_t *priority)
+{
+    if (src != NULL)
+    {
+        *src = (uint8_t)(canId & 0x7Fu);
+    }
+
+    if (dst != NULL)
+    {
+        *dst = (uint8_t)((canId >> 7) & 0x7Fu);
+    }
+
+    if (msgId != NULL)
+    {
+        *msgId = (uint16_t)((canId >> 14) & 0x03FFu);
+    }
+
+    if (priority != NULL)
+    {
+        *priority = (uint8_t)((canId >> 27) & 0x03u);
+    }
+
+    return true;
+}
+
+bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan, uint32_t extId)
+{
+    uint8_t src = 0u;
+    uint8_t dst = 0u;
+    uint8_t requestPriority = 0u;
+    uint16_t msgId = 0u;
+    uint8_t responsePayload[8] = {0};
+    uint32_t responseId;
+
+    CAN_ParseExtId(extId, &src, &dst, &msgId, &requestPriority);
+
+    if ((src != CAN_NODE_KOU) || (dst != CAN_NODE_IBP_4K))
+    {
+        return false;
+    }
+
+    if (!CAN_IsSupportedMsgId(msgId))
+    {
+        return false;
+    }
+
+    CAN_BuildResponsePayload(msgId, responsePayload);
+    responseId = CAN_BuildExtId(CAN_NODE_IBP_4K,
+                                CAN_NODE_KOU,
+                                msgId,
+                                CAN_ResponsePriorityForMsgId(msgId));
+
+    CAN_SendExtendedFrame(hcan, responseId, responsePayload, CAN_GetResponseDlc(msgId));
+
+    return true;
+}
+
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
-    if (hcan->Instance != CAN1)
+    CAN_RxHeaderTypeDef header = {0};
+    uint8_t frameData[8] = {0};
+
+    if ((hcan == NULL) || (hcan->Instance != CAN1))
     {
         return;
     }
 
-    CAN_RxHeaderTypeDef header = {0};
-    uint8_t frameData[8] = {0};
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, frameData) != HAL_OK)
     {
         return;
     }
 
-    UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-    canContext.header = header;
-    memcpy(canContext.data, frameData, sizeof(frameData));
-    canContext.dataReady = true;
-    taskEXIT_CRITICAL_FROM_ISR(irqState);
+    {
+        UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+        canContext.header = header;
+        memcpy(canContext.data, frameData, sizeof(frameData));
+        canContext.dataReady = true;
+        taskEXIT_CRITICAL_FROM_ISR(irqState);
+    }
 }
 
-/**
- * @brief Обработчик готовности сообщения CAN из FIFO1
- */
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
-    if (hcan->Instance != CAN1) return;
-    
     CAN_RxHeaderTypeDef header = {0};
     uint8_t frameData[8] = {0};
+
+    if ((hcan == NULL) || (hcan->Instance != CAN1))
+    {
+        return;
+    }
+
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, frameData) != HAL_OK)
     {
         return;
     }
-    // ✅ Сохраняем данные так же, как в FIFO0
-    UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-    canContext.header = header;
-    memcpy(canContext.data, frameData, sizeof(frameData));
-    canContext.dataReady = true;
-    taskEXIT_CRITICAL_FROM_ISR(irqState);
+
+    {
+        UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+        canContext.header = header;
+        memcpy(canContext.data, frameData, sizeof(frameData));
+        canContext.dataReady = true;
+        taskEXIT_CRITICAL_FROM_ISR(irqState);
+    }
 }
 
-/**
- * @brief Обработчик ошибок CAN
- */
 void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
 {
-    if (hcan->Instance != CAN1)
+    if ((hcan == NULL) || (hcan->Instance != CAN1))
     {
         return;
     }
 
-    UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-    canContext.errorCode = hcan->ErrorCode;
-    canContext.errorDetected = true;
-    canContext.dataReady = false;
-    memset(&canContext.header, 0, sizeof(canContext.header));
-    memset(canContext.data, 0, sizeof(canContext.data));
-    taskEXIT_CRITICAL_FROM_ISR(irqState);
-}
-
-/**
- * @brief Сериализует структуру ModbusSlaveData_t в байтовый массив (big-endian)
- */
-size_t SerializeModbusData(const ModbusSlaveData_t *data_in, uint8_t *buffer_out)
-{
-    if (!data_in || !buffer_out || !data_in->valid) return 0;
-    
-    size_t idx = 0;
-
-    WRITE_REG_CAN(data_in->ina_config);
-    WRITE_REG_CAN(data_in->voltage_mv);
-    WRITE_REG_CAN((uint16_t)data_in->current_ma);
-    WRITE_REG_CAN(data_in->power_mw);
-    WRITE_REG_CAN(data_in->bq_status_state_sys);
-    WRITE_REG_CAN(data_in->balancing_status);
-    
-    for (int i = 0; i < 10; i++) {
-        WRITE_REG_CAN(data_in->cell_voltage_mv[i]);
-    }
-    
-    WRITE_REG_CAN(data_in->pack_voltage_mv);
-    WRITE_REG_CAN((uint16_t)data_in->pack_current_ma);
-    WRITE_REG_CAN(data_in->ship_mode);
-    WRITE_REG_CAN(data_in->capacity_mah);
-    WRITE_REG_CAN(data_in->soc_percent);
-    WRITE_REG_CAN(data_in->calibration_active_flag);
-    WRITE_REG_CAN(data_in->error_flags);
-    WRITE_REG_CAN(data_in->firmware_version);
-    WRITE_REG_CAN((uint16_t)data_in->pack_current_raw_ma);
-    WRITE_REG_CAN((uint16_t)data_in->bq_curr_cal_x[0]);
-    WRITE_REG_CAN((uint16_t)data_in->bq_curr_cal_x[1]);
-    WRITE_REG_CAN((uint16_t)data_in->bq_curr_cal_y[0]);
-    WRITE_REG_CAN((uint16_t)data_in->bq_curr_cal_y[1]);
-    WRITE_REG_CAN((uint16_t)data_in->ina_curr_cal_x[0]);
-    WRITE_REG_CAN((uint16_t)data_in->ina_curr_cal_x[1]);
-    WRITE_REG_CAN((uint16_t)data_in->ina_curr_cal_y[0]);
-    WRITE_REG_CAN((uint16_t)data_in->ina_curr_cal_y[1]);
-    WRITE_REG_CAN(data_in->ina_volt_cal_x[0]);
-    WRITE_REG_CAN(data_in->ina_volt_cal_x[1]);
-    WRITE_REG_CAN(data_in->ina_volt_cal_y[0]);
-    WRITE_REG_CAN(data_in->ina_volt_cal_y[1]);
-    WRITE_REG_CAN(data_in->nominal_capacity_mah);
-    WRITE_REG_CAN(data_in->bq_coulomb_count_mah);
-    
-    return idx;
-}
-
-/**
- * @brief Отправляет данные от одного батарейного блока по CAN (разбито на пакеты)
- */
-void SendBatteryDataToCAN(uint8_t block_index, CAN_HandleTypeDef *hcan)
-{
-    extern ModbusSlaveData_t modbusSlaveData[];
-    extern volatile uint32_t lastProcessedCanError;
-    
-    if (block_index >= 4 || !modbusSlaveData[block_index].valid) return;
-    
-    uint8_t serialized_buffer[MODBUS_REGISTER_BYTE_COUNT] = {0};
-    size_t data_size = SerializeModbusData(&modbusSlaveData[block_index], serialized_buffer);
-    if (data_size == 0) return;
-    
-    // Базовый ID для блока
-    uint32_t base_id;
-    switch (block_index) {
-        case 0: base_id = CAN1_BLOCK_BASE; break;
-        case 1: base_id = CAN2_BLOCK_BASE; break;
-        case 2: base_id = CAN3_BLOCK_BASE; break;
-        case 3: base_id = CAN4_BLOCK_BASE; break;
-        default: return;
-    }
-    
-    // Разбиение на пакеты (по 8 байт)
-    size_t num_packets = (data_size + 7) / 8;
-    for (size_t packet = 1; packet <= num_packets; packet++) {
-        uint8_t packet_data[8] = {0};
-        size_t offset = (packet - 1) * 8;
-        size_t packet_len = (offset + 8 <= data_size) ? 8 : (data_size - offset);
-        memcpy(packet_data, &serialized_buffer[offset], packet_len);
-        
-        CAN_TxHeaderTypeDef tx_header;
-        tx_header.StdId = base_id + (packet - 1);
-        tx_header.ExtId = 0;
-        tx_header.RTR = CAN_RTR_DATA;
-        tx_header.IDE = CAN_ID_STD;
-        tx_header.DLC = packet_len;
-        tx_header.TransmitGlobalTime = DISABLE;
-        
-        uint32_t tx_mailbox;
-        if (osMutexWait(canContext.mutex, osWaitForever) == osOK) {
-            if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0) {
-                HAL_StatusTypeDef status = HAL_CAN_AddTxMessage(hcan, &tx_header, packet_data, &tx_mailbox);
-                if (status != HAL_OK) {
-                    lastProcessedCanError = hcan->ErrorCode;
-                }
-            }
-            osMutexRelease(canContext.mutex);
+    if ((hcan->ErrorCode & HAL_CAN_ERROR_BOF) != 0u)
+    {
+        if (canBusOffCounter < 0xFFFFu)
+        {
+            ++canBusOffCounter;
         }
-        
-        osDelay(10);
+
+        CAN_RecordErrorCode(0x01u);
+    }
+
+    {
+        UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+        canContext.errorCode = hcan->ErrorCode;
+        canContext.errorDetected = true;
+        canContext.dataReady = false;
+        memset(&canContext.header, 0, sizeof(canContext.header));
+        memset(canContext.data, 0, sizeof(canContext.data));
+        taskEXIT_CRITICAL_FROM_ISR(irqState);
     }
 }
 
-/**
- * @brief Обработчик CAN-команды управления пинами EN/1 - EN/4
- */
-bool CAN_HandleEnablePinsControl(const uint8_t *can_data, uint8_t data_length)
-{
-    if (can_data == NULL || data_length < 2)
-    {
-        return false;
-    }
-    
-    uint8_t pin_number = can_data[0];
-    uint8_t pin_state = can_data[1];
-    
-    if (pin_number < 1 || pin_number > 4)
-    {
-        return false;
-    }
-    
-    if (pin_state > 1)
-    {
-        return false;
-    }
-    
-    GPIO_PinState gpio_state = (pin_state == 0x00) ? GPIO_PIN_RESET : GPIO_PIN_SET;
-    
-    uint16_t gpio_pin = 0;
-    switch (pin_number)
-    {
-        case 0x01: gpio_pin = EN_1_Pin; break;
-        case 0x02: gpio_pin = EN_2_Pin; break;
-        case 0x03: gpio_pin = EN_3_Pin; break;
-        case 0x04: gpio_pin = EN_4_Pin; break;
-        default: return false;
-    }
-    
-    HAL_GPIO_WritePin(GPIOG, gpio_pin, gpio_state);
-    
-    return true;
-}
-
-
-
-
-/* Отправка простого CAN-кадра с указанным CAN Id и пустыми/произвольными данными */
 void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan,
-                                uint32_t stdId,
-                                const uint8_t *data,
-                                uint8_t dlc)
+                         uint32_t stdId,
+                         const uint8_t *data,
+                         uint8_t dlc)
 {
-    CAN_TxHeaderTypeDef txHeader;
-    uint32_t txMailbox;
-    uint8_t  txData[8] = {0};
+    CAN_SendFrame(hcan, stdId, CAN_ID_STD, data, dlc);
+}
 
-    if (dlc > 8u) dlc = 8u;
-    if (data != NULL && dlc > 0u)
-    {
-        memcpy(txData, data, dlc);
-    }
+void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
+                           uint32_t extId,
+                           const uint8_t *data,
+                           uint8_t dlc)
+{
+    CAN_SendFrame(hcan, extId, CAN_ID_EXT, data, dlc);
+}
 
-    txHeader.StdId = stdId;
-    txHeader.ExtId = 0;
-    txHeader.RTR   = CAN_RTR_DATA;
-    txHeader.IDE   = CAN_ID_STD;
-    txHeader.DLC   = dlc;
-    txHeader.TransmitGlobalTime = DISABLE;
-
-    if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0u)
-    {
-        (void)HAL_CAN_AddTxMessage(hcan, &txHeader, txData, &txMailbox);
-    }
+void CAN_ReportFlashWriteError(void)
+{
+    CAN_RecordErrorCode(0x04u);
 }

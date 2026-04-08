@@ -74,7 +74,7 @@ static const uint16_t modbusStartRegister = 0u;
 
 /* Переменные для отладки последних обработанных сообщений */
 volatile uint8_t lastProcessedUartNumber = 0u;
-volatile uint16_t lastProcessedCanId = 0u;
+volatile uint32_t lastProcessedCanId = 0u;
 volatile uint8_t lastProcessedCanDlc = 0u;
 volatile uint32_t lastProcessedUartError = 0u;
 volatile uint32_t lastProcessedCanError = 0u;
@@ -133,9 +133,7 @@ void StartTask04(void const * argument);
 void BAT_SetIndicator(uint8_t battery);
 void BAT_UpdateAllIndicators(void);
 bool ParseModbusResponse(const uint8_t *response, size_t length, ModbusSlaveData_t *data_out);
-extern int Modbus_WriteRegister(uint16_t reg_addr, uint16_t data, uint8_t battery_block);
 extern void Uart_CheckAndRecover(UartContext_t *ctx);
-extern void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan, uint32_t stdId, const uint8_t *data, uint8_t dlc);    
 
 
 HAL_StatusTypeDef FLASH_EraseSectors(uint32_t firstSector, uint32_t lastSector); //стирает сектора
@@ -596,20 +594,6 @@ void StartDefaultTask(void const * argument)
                   EN_1_Pin | EN_2_Pin | EN_3_Pin | EN_4_Pin,
                   GPIO_PIN_SET);
     HAL_GPIO_WritePin(RS485_ON2_GPIO_Port, RS485_ON2_Pin, GPIO_PIN_RESET);
-    
-    // структура для передачи CAN 
-    CAN_TxHeaderTypeDef TxHeader;
-    uint32_t TxMailbox;
-
-    TxHeader.StdId = 0x123;
-    TxHeader.ExtId = 0;
-    TxHeader.RTR = CAN_RTR_DATA;
-    TxHeader.IDE = CAN_ID_STD;
-    TxHeader.DLC = 8;
-    TxHeader.TransmitGlobalTime = DISABLE;
-    
-    volatile uint8_t can_need_data = 0;
-    uint8_t block_num = 0xFF;
 
   /* Infinite loop */
   for(;;)
@@ -618,16 +602,13 @@ void StartDefaultTask(void const * argument)
     
     if (canContext.errorDetected)
     {
-      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
-      {
-        lastProcessedCanError = canContext.errorCode;
-        lastProcessedCanId = 0u;
-        lastProcessedCanDlc = 0u;
-       
-        canContext.errorDetected = false;
-        canContext.errorCode = 0u;
-        osMutexRelease(canContext.mutex);
-      }
+      taskENTER_CRITICAL();
+      lastProcessedCanError = canContext.errorCode;
+      lastProcessedCanId = 0u;
+      lastProcessedCanDlc = 0u;
+      canContext.errorDetected = false;
+      canContext.errorCode = 0u;
+      taskEXIT_CRITICAL();
     }
     else if (canContext.dataReady)
     {
@@ -644,39 +625,17 @@ void StartDefaultTask(void const * argument)
       taskEXIT_CRITICAL();
 
       dataLength = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
-      if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
+      lastProcessedCanId = (localHeader.IDE == CAN_ID_EXT) ? localHeader.ExtId : localHeader.StdId;
+      lastProcessedCanDlc = dataLength;
+
+      if (localHeader.IDE == CAN_ID_EXT)
       {
-        lastProcessedCanId = (localHeader.IDE == CAN_ID_EXT) ? localHeader.ExtId : localHeader.StdId;
-        lastProcessedCanDlc = dataLength;
-        
-        block_num = 0xFF;
-        
-        switch (lastProcessedCanId)
+        (void)CAN_HandleRegisterRequest(&hcan1, localHeader.ExtId);
+      }
+      else
+      {
+        switch ((uint16_t)lastProcessedCanId)
         {
-          case CAN_CMD_GET_REGS:
-            can_need_data = 1;
-            break;
-            
-          case CAN_WRITE_B1:
-            block_num = 0;
-            break;
-            
-          case CAN_WRITE_B2:
-            block_num = 1;
-            break;
-            
-          case CAN_WRITE_B3:
-            block_num = 2;
-            break;
-            
-          case CAN_WRITE_B4:
-            block_num = 3;
-            break;
-            
-          case CAN_CMD_EN_PINS:  // 0x40E - управление пинами EN/1-EN/4
-            CAN_HandleEnablePinsControl(CanlocalData, dataLength);
-            break;
-            
           /* ============================================================
              ОБНОВЛЕНИЕ ОС SLAVE: НАЧАЛО (0x4E1)
              ============================================================ */
@@ -714,6 +673,10 @@ void StartDefaultTask(void const * argument)
               // Ошибка стирания или некорректное количество блоков
               responseData[0] = 0u;  // Статус: ошибка
               slaveFwState.updateInProgress = false;
+              if (eraseStatus != HAL_OK)
+              {
+                CAN_ReportFlashWriteError();
+              }
             }
 
             // Отправляем ответ с тем же CAN ID (0x4E1) и статусом
@@ -771,6 +734,10 @@ void StartDefaultTask(void const * argument)
             {
               responseData[0] = 0u;  // Ошибка
               masterFwState.updateInProgress = false;
+              if (eraseStatus != HAL_OK)
+              {
+                CAN_ReportFlashWriteError();
+              }
             }
 
             // Отправляем ответ
@@ -823,31 +790,11 @@ void StartDefaultTask(void const * argument)
             
             break;
           }
-            
-            
-        }
-          
-        if(block_num != 0xFF)
-        {
-          uint16_t reg_addr = CanlocalData[0];
-          uint16_t reg_value = ((uint16_t)CanlocalData[1] << 8) | CanlocalData[2];
-          // Записываем значение в регистр блока
-          Modbus_WriteRegister(reg_addr, reg_value, block_num);
-        }
-        
-        osMutexRelease(canContext.mutex);
-      }
-    }
 
-    //-------------------------------------------------------------------------------------------------------------
-    
-    if(can_need_data)
-    {
-      for (uint8_t block = 0; block < UART_CHANNEL_COUNT; block++) 
-      {
-        SendBatteryDataToCAN(block, &hcan1);
+          default:
+            break;
+        }
       }
-      can_need_data = 0;
     }
     
     osDelay(10); 
@@ -1225,6 +1172,13 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
         HAL_StatusTypeDef writeStatus = FLASH_WriteBuffer(state->writeAddress, 
                                                            state->blockBuffer, 
                                                            bytesToWrite);
+
+        if (writeStatus != HAL_OK)
+        {
+            state->updateInProgress = false;
+            CAN_ReportFlashWriteError();
+            return;
+        }
 
         // Формируем подтверждение: номер записанного блока
         uint8_t ackData[2];

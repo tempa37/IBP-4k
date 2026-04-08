@@ -6,10 +6,6 @@
 #include "stdbool.h"
 #include "string.h"
 
-/* Макрос для записи регистра в CAN */
-#define WRITE_REG_CAN(val) buffer_out[idx++] = (uint8_t)((val) >> 8); buffer_out[idx++] = (uint8_t)((val) & 0xFF);
-
-/* Структура для хранения контекста CAN */
 typedef struct
 {
     osMutexId mutex;
@@ -20,8 +16,8 @@ typedef struct
     volatile uint32_t errorCode;
 } CanContext_t;
 
-/* Структура для хранения всех данных от Modbus Slave */
-typedef struct {
+typedef struct
+{
     uint16_t ina_config;
     uint16_t voltage_mv;
     int16_t  current_ma;
@@ -51,45 +47,61 @@ typedef struct {
     uint8_t  slave_id;
 } ModbusSlaveData_t;
 
-/* Блоки данных батарейных модулей (чтение) */
-#define CAN1_BLOCK_BASE     0x400U
-#define CAN2_BLOCK_BASE     0x420U
-#define CAN3_BLOCK_BASE     0x440U
-#define CAN4_BLOCK_BASE     0x460U
+/* CAN node addresses from the specification */
+#define CAN_NODE_KOU        1U
+#define CAN_NODE_IBP_4K     20U
 
-/* Команды CAN */
-#define CAN_CMD_GET_REGS    0x40FU
-#define CAN_CMD_EN_PINS     0x40EU
-#define CAN_WRITE_B1        0x4F1U
-#define CAN_WRITE_B2        0x4F2U
-#define CAN_WRITE_B3        0x4F3U
-#define CAN_WRITE_B4        0x4F4U
+/* Request/response message identifiers from the specification */
+#define CAN_MSG_INA260_VOLTAGE          20U
+#define CAN_MSG_INA260_CURRENT          21U
+#define CAN_MSG_BAT_SOC                 22U
+#define CAN_MSG_BQ_STATUS               23U
+#define CAN_MSG_ERROR_FLAGS             24U
+#define CAN_MSG_UART_VERSION            25U
+#define CAN_MSG_BAT_CAPACITY_MAH        26U
+#define CAN_MSG_BAT_NOMINAL_CAP         27U
+#define CAN_MSG_BQ_COULOMB_COUNT_MAH    28U
+#define CAN_MSG_CAN_BUSOFF_COUNTER      30U
+#define CAN_MSG_WDG_RESET_COUNTER       31U
+#define CAN_MSG_LAST_ERROR_TIMESTAMP    32U
+#define CAN_MSG_LAST_ERROR_CODE         33U
 
-#define CAN_FLAG_SLAWE_OS  0x4E1U //говорит о том, что нужно стереть сектора для слейв прошивки + data(количество будущих пакетов)
-#define CAN_SLAWE_OS       0x4E2U //говорит о том, что пришел пакет с прошивкой слейва + index (data0 + data1)
+#define CAN_PRIORITY_DEFAULT            0U
+#define CAN_PRIORITY_DIAGNOSTIC         3U
 
+/* ERROR_FLAGS bits according to the specification */
+#define CAN_ERROR_FLAG_BQ_ERROR             (1U << 0)
+#define CAN_ERROR_FLAG_INA_ERROR            (1U << 1)
+#define CAN_ERROR_FLAG_BALANCE_WARNING      (1U << 2)
+#define CAN_ERROR_FLAG_BALANCE_CRITICAL     (1U << 3)
+#define CAN_ERROR_FLAG_COMM_ERROR           (1U << 4)
 
-#define CAN_FLAG_OUR_OS  0x4E4U //говорит о том, что нужно стереть сектора для своей прошивки + data(количество будущих пакетов)
-#define CAN_OUR_OS       0x4E5U //говорит о том, что пришел пакет с нашей прошивкой + index (data0 + data1)
+#define CAN_BALANCE_WARNING_THRESHOLD_MV    50U
+#define CAN_BALANCE_CRITICAL_THRESHOLD_MV   100U
 
+/* Current firmware update IDs are kept unchanged. */
+#define CAN_FLAG_SLAWE_OS        0x4E1U
+#define CAN_SLAWE_OS             0x4E2U
+#define CAN_MASSAGE_OK           0x4E3U
+#define CAN_FLAG_OUR_OS          0x4E4U
+#define CAN_OUR_OS               0x4E5U
+#define CAN_SLAVE_UPDATE_START   0x4FAU
 
-#define CAN_MASSAGE_OK       0x4E3U //этот флаг отсылаем мы, говорит о том что блок с прошивкой получен (+data0 = 0/1)
-
-#define CAN_SLAVE_UPDATE_START 0x4FA //  + data[0] = номер слейва (батарейного блока)
-
-
-/* Глобальные переменные CAN */
 extern CanContext_t canContext;
 extern uint8_t CanlocalData[8];
 
-/* Функции CAN */
-void CAN_Init(void);
 void MX_CAN1_Init(void);
-size_t SerializeModbusData(const ModbusSlaveData_t *data_in, uint8_t *buffer_out);
-void SendBatteryDataToCAN(uint8_t block_index, CAN_HandleTypeDef *hcan);
-bool CAN_HandleEnablePinsControl(const uint8_t *can_data, uint8_t data_length);
+uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priority);
+bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId, uint8_t *priority);
+bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan, uint32_t extId);
 void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan,
-                                uint32_t stdId,
-                                const uint8_t *data,
-                                uint8_t dlc);          //отправка сообщения
+                         uint32_t stdId,
+                         const uint8_t *data,
+                         uint8_t dlc);
+void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
+                           uint32_t extId,
+                           const uint8_t *data,
+                           uint8_t dlc);
+void CAN_ReportFlashWriteError(void);
+
 #endif /* CAN_H */
