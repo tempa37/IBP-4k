@@ -5,11 +5,12 @@ import argparse
 import struct
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Optional, Sequence
 
 try:
+    from gs_usb.constants import CAN_EFF_FLAG, CAN_EFF_MASK, CAN_SFF_MASK
     from gs_usb.gs_usb import GsUsb
     from gs_usb.gs_usb_frame import GsUsbFrame
 except ImportError:
@@ -22,146 +23,243 @@ FW_BLOCK_SIZE_PACKETS = 10
 FW_PACKET_DATA_SIZE = 6
 FW_BLOCK_SIZE_BYTES = FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE
 
-CAN_FLAG_SLAVE_OS = 0x4E1
-CAN_SLAVE_OS = 0x4E2
-CAN_ACK_BLOCK = 0x4E3
-CAN_FLAG_MASTER_OS = 0x4E4
-CAN_MASTER_OS = 0x4E5
+CAN_PROTOCOL_ADDR_KOU = 1
+CAN_PROTOCOL_ADDR_IBP4K = 20
 
-CAN_CMD_GET_REGS = 0x40F
-CAN_SLAVE_UPDATE_START = 0x4FA
+CAN_PROTOCOL_MSG_INA260_VOLTAGE = 20
+CAN_PROTOCOL_MSG_INA260_CURRENT = 21
+CAN_PROTOCOL_MSG_BAT_SOC = 22
+CAN_PROTOCOL_MSG_BQ_STATUS = 23
+CAN_PROTOCOL_MSG_ERROR_FLAGS = 24
+CAN_PROTOCOL_MSG_UART_VERSION = 25
+CAN_PROTOCOL_MSG_BAT_CAPACITY_MAH = 26
+CAN_PROTOCOL_MSG_BAT_NOMINAL_CAP = 27
+CAN_PROTOCOL_MSG_BQ_COULOMB_COUNT_MAH = 28
+CAN_PROTOCOL_MSG_CAN_BUS_OFF_COUNTER = 30
+CAN_PROTOCOL_MSG_WDG_RESET_COUNTER = 31
+CAN_PROTOCOL_MSG_LAST_ERROR_TIMESTAMP = 32
+CAN_PROTOCOL_MSG_LAST_ERROR_CODE = 33
+CAN_PROTOCOL_MSG_FW_SLAVE_BEGIN = 40
+CAN_PROTOCOL_MSG_FW_SLAVE_DATA = 41
+CAN_PROTOCOL_MSG_FW_ACK = 42
+CAN_PROTOCOL_MSG_FW_MASTER_BEGIN = 43
+CAN_PROTOCOL_MSG_FW_MASTER_DATA = 44
+CAN_PROTOCOL_MSG_FW_SLAVE_UPDATE_START = 45
 
-CAN_BLOCK_BASE_IDS = {
-    0: 0x400,
-    1: 0x420,
-    2: 0x440,
-    3: 0x460,
-}
-
-MODBUS_REGISTER_COUNT = 0x27
-MODBUS_REGISTER_BYTE_COUNT = MODBUS_REGISTER_COUNT * 2
-CAN_PACKETS_PER_BLOCK = (MODBUS_REGISTER_BYTE_COUNT + 7) // 8
+CAN_PROTOCOL_PRIORITY_DEFAULT = 0
+CAN_PROTOCOL_PRIORITY_DIAGNOSTIC = 3
 
 TIMEOUT_INIT = 10.0
 TIMEOUT_ACK = 1.5
 MAX_RETRIES = 3
 
-DEFAULT_COLLECT_TIMEOUT = 2.0
-DEFAULT_GAP_TIMEOUT = 0.40
-DEFAULT_ATTEMPTS = 2
+DEFAULT_REQUEST_TIMEOUT = 0.75
+DEFAULT_REQUEST_ATTEMPTS = 3
+DEFAULT_REQUEST_PAUSE_MS = 40
+
+ERROR_FLAG_BITS = (
+    (0, "BQ_ERROR"),
+    (1, "INA_ERROR"),
+    (2, "BALANCE_WARNING"),
+    (3, "BALANCE_CRITICAL"),
+    (4, "COMM_ERROR"),
+)
+
+LAST_ERROR_CODE_DESCRIPTIONS = {
+    0x00: "Ошибок не зарегистрировано",
+    0x01: "Переход CAN-контроллера в состояние Bus Off",
+    0x02: "Сброс по Independent Watchdog (IWDG)",
+    0x03: "Ошибка контрольной суммы диагностических данных в Flash",
+    0x04: "Ошибка записи в Flash",
+}
 
 
 @dataclass(frozen=True)
-class RegisterDef:
-    index: int
+class RegisterRequestDef:
+    msg_id: int
     name: str
+    description: str
     signed: bool = False
+    diagnostic: bool = False
+    dlc: int = 8
+
+    @property
+    def request_priority(self) -> int:
+        return CAN_PROTOCOL_PRIORITY_DEFAULT
+
+    @property
+    def response_priority(self) -> int:
+        return (
+            CAN_PROTOCOL_PRIORITY_DIAGNOSTIC
+            if self.diagnostic
+            else CAN_PROTOCOL_PRIORITY_DEFAULT
+        )
 
 
-REGISTER_LAYOUT = [
-    RegisterDef(0, "ina_config"),
-    RegisterDef(1, "voltage_mv"),
-    RegisterDef(2, "current_ma", signed=True),
-    RegisterDef(3, "power_mw"),
-    RegisterDef(4, "bq_status_state_sys"),
-    RegisterDef(5, "balancing_status"),
-    RegisterDef(6, "cell_voltage_mv[0]"),
-    RegisterDef(7, "cell_voltage_mv[1]"),
-    RegisterDef(8, "cell_voltage_mv[2]"),
-    RegisterDef(9, "cell_voltage_mv[3]"),
-    RegisterDef(10, "cell_voltage_mv[4]"),
-    RegisterDef(11, "cell_voltage_mv[5]"),
-    RegisterDef(12, "cell_voltage_mv[6]"),
-    RegisterDef(13, "cell_voltage_mv[7]"),
-    RegisterDef(14, "cell_voltage_mv[8]"),
-    RegisterDef(15, "cell_voltage_mv[9]"),
-    RegisterDef(16, "pack_voltage_mv"),
-    RegisterDef(17, "pack_current_ma", signed=True),
-    RegisterDef(18, "ship_mode"),
-    RegisterDef(19, "capacity_mah"),
-    RegisterDef(20, "soc_percent"),
-    RegisterDef(21, "calibration_active_flag"),
-    RegisterDef(22, "error_flags"),
-    RegisterDef(23, "firmware_version"),
-    RegisterDef(24, "pack_current_raw_ma", signed=True),
-    RegisterDef(25, "bq_curr_cal_x[0]", signed=True),
-    RegisterDef(26, "bq_curr_cal_x[1]", signed=True),
-    RegisterDef(27, "bq_curr_cal_y[0]", signed=True),
-    RegisterDef(28, "bq_curr_cal_y[1]", signed=True),
-    RegisterDef(29, "ina_curr_cal_x[0]", signed=True),
-    RegisterDef(30, "ina_curr_cal_x[1]", signed=True),
-    RegisterDef(31, "ina_curr_cal_y[0]", signed=True),
-    RegisterDef(32, "ina_curr_cal_y[1]", signed=True),
-    RegisterDef(33, "ina_volt_cal_x[0]"),
-    RegisterDef(34, "ina_volt_cal_x[1]"),
-    RegisterDef(35, "ina_volt_cal_y[0]"),
-    RegisterDef(36, "ina_volt_cal_y[1]"),
-    RegisterDef(37, "nominal_capacity_mah"),
-    RegisterDef(38, "bq_coulomb_count_mah"),
+REQUEST_LAYOUT = [
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_INA260_VOLTAGE,
+        "INA260_VOLTAGE",
+        "Напряжение на нагрузке (мВ).",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_INA260_CURRENT,
+        "INA260_CURRENT",
+        "Ток через нагрузку (мА). Знаковое.",
+        signed=True,
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_BAT_SOC,
+        "BAT_SOC",
+        "Текущий процент заряда (SoC), 0-100%.",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_BQ_STATUS,
+        "BQ_STATUS",
+        "Статус BQ76930. Ст. байт = состояние (state), мл. байт = системный статус (sys_stat).",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_ERROR_FLAGS,
+        "ERROR_FLAGS",
+        "Битовая маска ошибок.",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_UART_VERSION,
+        "UART_VERSION",
+        "Версия протокола/прошивки UART.",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_BAT_CAPACITY_MAH,
+        "BAT_CAPACITY_MAH",
+        "Текущая абсолютная емкость (мАч).",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_BAT_NOMINAL_CAP,
+        "BAT_NOMINAL_CAP",
+        "Номинальная емкость батареи из EEPROM (мАч).",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_BQ_COULOMB_COUNT_MAH,
+        "BQ_COULOMB_COUNT_MAH",
+        "Значение кулоновского счетчика (мАч).",
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_CAN_BUS_OFF_COUNTER,
+        "CAN_BusOff_Counter",
+        "Счетчик входов в состояние Bus Off.",
+        diagnostic=True,
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_WDG_RESET_COUNTER,
+        "WDG_Reset_Counter",
+        "Счетчик сбросов по Independent Watchdog.",
+        diagnostic=True,
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_LAST_ERROR_TIMESTAMP,
+        "Last_Error_Timestamp",
+        "Время последней ошибки (часы наработки).",
+        diagnostic=True,
+    ),
+    RegisterRequestDef(
+        CAN_PROTOCOL_MSG_LAST_ERROR_CODE,
+        "Last_Error_Code",
+        "Код последней ошибки.",
+        diagnostic=True,
+        dlc=4,
+    ),
 ]
 
 
 @dataclass
 class Frame:
-    can_id: int
+    raw_can_id: int
+    arbitration_id: int
+    is_extended_id: bool
     data: bytes
 
 
 @dataclass
-class BlockCapture:
-    block_index: int
-    packets: Dict[int, bytes] = field(default_factory=dict)
-
-    @property
-    def base_id(self) -> int:
-        return CAN_BLOCK_BASE_IDS[self.block_index]
-
-    def missing_packets(self) -> list[int]:
-        return [idx for idx in range(CAN_PACKETS_PER_BLOCK) if idx not in self.packets]
-
-    def is_complete(self) -> bool:
-        return not self.missing_packets()
-
-    def assemble_payload(self) -> bytes:
-        missing = self.missing_packets()
-        if missing:
-            missing_ids = ", ".join(f"0x{self.base_id + idx:03X}" for idx in missing)
-            raise ValueError(f"missing packet IDs: {missing_ids}")
-
-        payload = bytearray()
-        for packet_index in range(CAN_PACKETS_PER_BLOCK):
-            payload.extend(self.packets[packet_index])
-
-        if len(payload) < MODBUS_REGISTER_BYTE_COUNT:
-            raise ValueError(
-                f"received only {len(payload)} payload bytes, expected {MODBUS_REGISTER_BYTE_COUNT}"
-            )
-
-        return bytes(payload[:MODBUS_REGISTER_BYTE_COUNT])
+class RegisterReadResult:
+    definition: RegisterRequestDef
+    request_id: int
+    response_id: int
+    values: Optional[list[int]] = None
+    data: bytes = b""
+    error: Optional[str] = None
 
 
-def to_signed16(value: int) -> int:
-    return value - 0x10000 if value & 0x8000 else value
+def build_protocol_can_id(src: int, dst: int, msg_id: int, priority: int = 0) -> int:
+    if not (0 <= src <= 0x7F):
+        raise ValueError(f"SRC out of range: {src}")
+    if not (0 <= dst <= 0x7F):
+        raise ValueError(f"DST out of range: {dst}")
+    if not (0 <= msg_id <= 0x3FF):
+        raise ValueError(f"MSG_ID out of range: {msg_id}")
+    if not (0 <= priority <= 0x03):
+        raise ValueError(f"Priority out of range: {priority}")
+
+    return src | (dst << 7) | (msg_id << 14) | (priority << 27)
 
 
-def decode_registers(payload: bytes) -> list[int]:
-    if len(payload) < MODBUS_REGISTER_BYTE_COUNT:
-        raise ValueError(
-            f"payload is too short: {len(payload)} bytes, expected {MODBUS_REGISTER_BYTE_COUNT}"
-        )
-
-    registers = []
-    for offset in range(0, MODBUS_REGISTER_BYTE_COUNT, 2):
-        registers.append(struct.unpack(">H", payload[offset : offset + 2])[0])
-    return registers
+def build_update_can_id(src: int, dst: int, msg_id: int) -> int:
+    return build_protocol_can_id(
+        src=src,
+        dst=dst,
+        msg_id=msg_id,
+        priority=CAN_PROTOCOL_PRIORITY_DEFAULT,
+    )
 
 
-def resolve_block_packet(can_id: int) -> tuple[Optional[int], Optional[int]]:
-    for block_index, base_id in CAN_BLOCK_BASE_IDS.items():
-        packet_index = can_id - base_id
-        if 0 <= packet_index < CAN_PACKETS_PER_BLOCK:
-            return block_index, packet_index
-    return None, None
+def decode_u16_values_le(payload: bytes, signed: bool) -> list[int]:
+    if len(payload) != 8:
+        raise ValueError(f"expected 8 payload bytes, got {len(payload)}")
+
+    values: list[int] = []
+    for offset in range(0, 8, 2):
+        values.append(int.from_bytes(payload[offset : offset + 2], "little", signed=signed))
+    return values
+
+
+def decode_last_error_codes(payload: bytes) -> list[int]:
+    if len(payload) != 4:
+        raise ValueError(f"expected 4 payload bytes, got {len(payload)}")
+    return list(payload[:4])
+
+
+def channel_label(index: int) -> str:
+    return f"ПСИП {index} (лоток АКБ {index + 1})"
+
+
+def format_error_flags(value: int) -> str:
+    active = [name for bit, name in ERROR_FLAG_BITS if value & (1 << bit)]
+    if not active:
+        return f"{value} (0x{value & 0xFFFF:04X}, no active bits)"
+    return f"{value} (0x{value & 0xFFFF:04X}, {', '.join(active)})"
+
+
+def format_bq_status(value: int) -> str:
+    state = (value >> 8) & 0xFF
+    sys_stat = value & 0xFF
+    return (
+        f"{value} (0x{value & 0xFFFF:04X}, "
+        f"state=0x{state:02X}, sys_stat=0x{sys_stat:02X})"
+    )
+
+
+def format_last_error_code(value: int) -> str:
+    description = LAST_ERROR_CODE_DESCRIPTIONS.get(value, "Зарезервировано")
+    return f"0x{value:02X} ({description})"
+
+
+def format_register_value(definition: RegisterRequestDef, value: int) -> str:
+    if definition.name == "BQ_STATUS":
+        return format_bq_status(value & 0xFFFF)
+    if definition.name == "ERROR_FLAGS":
+        return format_error_flags(value & 0xFFFF)
+    if definition.name == "Last_Error_Code":
+        return format_last_error_code(value & 0xFF)
+    return f"{value} (0x{value & 0xFFFF:04X})"
 
 
 class CandleLightCanClient:
@@ -200,24 +298,39 @@ class CandleLightCanClient:
                 pass
         print("Disconnected.")
 
-    def _log_frame(self, direction: str, can_id: int, data: bytes) -> None:
+    @staticmethod
+    def _decode_can_id(raw_can_id: int) -> tuple[int, bool]:
+        is_extended_id = bool(raw_can_id & CAN_EFF_FLAG)
+        mask = CAN_EFF_MASK if is_extended_id else CAN_SFF_MASK
+        return raw_can_id & mask, is_extended_id
+
+    def _log_frame(self, direction: str, raw_can_id: int, data: bytes) -> None:
         if not self.verbose:
             return
-        hex_data = " ".join(f"{byte:02X}" for byte in data)
-        print(f"{direction} ID=0x{can_id:03X} DLC={len(data)} DATA=[{hex_data}]")
 
-    def send_frame(self, can_id: int, data: bytes = b"") -> bool:
+        arbitration_id, is_extended_id = self._decode_can_id(raw_can_id)
+        kind = "EXT" if is_extended_id else "STD"
+        id_width = 8 if is_extended_id else 3
+        hex_data = " ".join(f"{byte:02X}" for byte in data)
+        print(
+            f"{direction} {kind} ID=0x{arbitration_id:0{id_width}X} "
+            f"DLC={len(data)} DATA=[{hex_data}]"
+        )
+
+    def send_frame(self, can_id: int, data: bytes = b"", is_extended_id: bool = False) -> bool:
         if self.dev is None:
             print("CAN device is not connected.")
             return False
 
         try:
             payload = bytes(data)
-            self._log_frame("TX", can_id, payload)
-            frame = GsUsbFrame(can_id=can_id, data=payload)
+            raw_can_id = can_id | CAN_EFF_FLAG if is_extended_id else can_id
+            self._log_frame("TX", raw_can_id, payload)
+            frame = GsUsbFrame(can_id=raw_can_id, data=payload)
             return bool(self.dev.send(frame))
         except Exception as exc:
-            print(f"TX failed for 0x{can_id:03X}: {exc}")
+            id_width = 8 if is_extended_id else 3
+            print(f"TX failed for 0x{can_id:0{id_width}X}: {exc}")
             return False
 
     def read_frame(self, timeout_ms: int = 100) -> Optional[Frame]:
@@ -230,15 +343,28 @@ class CandleLightCanClient:
 
         data = bytes(frame.data[: frame.can_dlc])
         self._log_frame("RX", frame.can_id, data)
-        return Frame(can_id=frame.can_id, data=data)
+        arbitration_id, is_extended_id = self._decode_can_id(frame.can_id)
+        return Frame(
+            raw_can_id=frame.can_id,
+            arbitration_id=arbitration_id,
+            is_extended_id=is_extended_id,
+            data=data,
+        )
 
-    def wait_for_id(self, expected_id: int, timeout: float) -> Optional[bytes]:
+    def wait_for_id(
+        self,
+        expected_id: int,
+        timeout: float,
+        is_extended_id: Optional[bool] = None,
+    ) -> Optional[bytes]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             frame = self.read_frame(timeout_ms=100)
             if frame is None:
                 continue
-            if frame.can_id == expected_id:
+            if is_extended_id is not None and frame.is_extended_id != is_extended_id:
+                continue
+            if frame.arbitration_id == expected_id:
                 return frame.data
         return None
 
@@ -251,14 +377,33 @@ class CandleLightCanClient:
 
 
 class FirmwareUploader:
-    def __init__(self, client: CandleLightCanClient, verbose: bool = True, slave_num: int = 0):
+    def __init__(
+        self,
+        client: CandleLightCanClient,
+        verbose: bool = True,
+        slave_num: int = 0,
+        src_addr: int = CAN_PROTOCOL_ADDR_KOU,
+        dst_addr: int = CAN_PROTOCOL_ADDR_IBP4K,
+    ):
         self.client = client
         self.verbose = verbose
         self.slave_num = slave_num
+        self.src_addr = src_addr
+        self.dst_addr = dst_addr
         self.firmware: Optional[bytes] = None
         self.is_master = False
         self.total_blocks = 0
         self.sent_blocks = 0
+
+    def _command_id(self, msg_id: int) -> int:
+        return build_update_can_id(self.src_addr, self.dst_addr, msg_id)
+
+    def _ack_id(self) -> int:
+        return build_update_can_id(
+            self.dst_addr,
+            self.src_addr,
+            CAN_PROTOCOL_MSG_FW_ACK,
+        )
 
     def load_firmware(self, path: Path, is_master: bool) -> bool:
         try:
@@ -277,17 +422,22 @@ class FirmwareUploader:
         return True
 
     def init_update(self) -> bool:
-        init_id = CAN_FLAG_MASTER_OS if self.is_master else CAN_FLAG_SLAVE_OS
+        init_id = self._command_id(
+            CAN_PROTOCOL_MSG_FW_MASTER_BEGIN
+            if self.is_master
+            else CAN_PROTOCOL_MSG_FW_SLAVE_BEGIN
+        )
+        ack_id = self._ack_id()
         request = struct.pack(">H", self.total_blocks)
 
-        print(f"Init update: send 0x{init_id:03X}, total_blocks={self.total_blocks}")
+        print(f"Init update: send 0x{init_id:08X}, total_blocks={self.total_blocks}")
         self.client.drain_rx()
-        if not self.client.send_frame(init_id, request):
+        if not self.client.send_frame(init_id, request, is_extended_id=True):
             return False
 
         deadline = time.monotonic() + TIMEOUT_INIT
         while time.monotonic() < deadline:
-            response = self.client.wait_for_id(CAN_ACK_BLOCK, timeout=0.5)
+            response = self.client.wait_for_id(ack_id, timeout=0.5, is_extended_id=True)
             if response is None or not response:
                 continue
 
@@ -299,7 +449,7 @@ class FirmwareUploader:
                 print(f"Waiting for erase completion, status=0x{response[0]:02X}")
             time.sleep(0.2)
 
-        print(f"Timeout waiting for init ACK on 0x{CAN_ACK_BLOCK:03X}.")
+        print(f"Timeout waiting for init ACK on 0x{ack_id:08X}.")
         return False
 
     def send_block(self, block_num: int) -> bool:
@@ -309,7 +459,12 @@ class FirmwareUploader:
         block_offset = block_num * FW_BLOCK_SIZE_BYTES
         block_len = min(FW_BLOCK_SIZE_BYTES, len(self.firmware) - block_offset)
         block_data = self.firmware[block_offset : block_offset + block_len]
-        can_id = CAN_MASTER_OS if self.is_master else CAN_SLAVE_OS
+        can_id = self._command_id(
+            CAN_PROTOCOL_MSG_FW_MASTER_DATA
+            if self.is_master
+            else CAN_PROTOCOL_MSG_FW_SLAVE_DATA
+        )
+        ack_id = self._ack_id()
 
         if self.verbose:
             print(f"Sending block #{block_num}: offset={block_offset}, len={block_len}")
@@ -328,7 +483,7 @@ class FirmwareUploader:
             frame_data = struct.pack(">H", global_idx) + packet[:FW_PACKET_DATA_SIZE]
 
             for attempt in range(1, MAX_RETRIES + 1):
-                if self.client.send_frame(can_id, frame_data):
+                if self.client.send_frame(can_id, frame_data, is_extended_id=True):
                     break
                 if attempt == MAX_RETRIES:
                     print(f"Failed to send packet {packet_num} of block {block_num}.")
@@ -337,7 +492,7 @@ class FirmwareUploader:
 
             time.sleep(0.02)
 
-        response = self.client.wait_for_id(CAN_ACK_BLOCK, TIMEOUT_ACK)
+        response = self.client.wait_for_id(ack_id, TIMEOUT_ACK, is_extended_id=True)
         if response is None or len(response) < 2:
             print(f"ACK timeout for block #{block_num}.")
             return False
@@ -356,11 +511,16 @@ class FirmwareUploader:
         if self.is_master:
             return
 
+        restart_id = self._command_id(CAN_PROTOCOL_MSG_FW_SLAVE_UPDATE_START)
         print(
-            f"Sending slave restart command: ID=0x{CAN_SLAVE_UPDATE_START:03X}, "
+            f"Sending slave restart command: ID=0x{restart_id:08X}, "
             f"slave_num={self.slave_num}"
         )
-        self.client.send_frame(CAN_SLAVE_UPDATE_START, bytes([self.slave_num & 0xFF]))
+        self.client.send_frame(
+            restart_id,
+            bytes([self.slave_num & 0xFF]),
+            is_extended_id=True,
+        )
 
     def upload(self) -> bool:
         if self.firmware is None:
@@ -397,136 +557,158 @@ class RegisterDumper:
     def __init__(
         self,
         client: CandleLightCanClient,
-        total_timeout: float,
-        gap_timeout: float,
+        request_timeout: float,
         attempts: int,
+        pause_ms: int,
+        src_addr: int,
+        dst_addr: int,
     ):
         self.client = client
-        self.total_timeout = total_timeout
-        self.gap_timeout = gap_timeout
+        self.request_timeout = request_timeout
         self.attempts = attempts
+        self.pause_s = max(0.0, pause_ms / 1000.0)
+        self.src_addr = src_addr
+        self.dst_addr = dst_addr
 
-    def request_once(self, captures: Dict[int, BlockCapture]) -> bool:
-        self.client.drain_rx()
-        if not self.client.send_frame(CAN_CMD_GET_REGS, b""):
-            return False
+    def _decode_response(
+        self,
+        definition: RegisterRequestDef,
+        payload: bytes,
+    ) -> list[int]:
+        if definition.msg_id == CAN_PROTOCOL_MSG_LAST_ERROR_CODE:
+            return decode_last_error_codes(payload)
+        return decode_u16_values_le(payload, signed=definition.signed)
 
-        start = time.monotonic()
-        last_relevant_rx: Optional[float] = None
-        saw_relevant = False
+    def request_register(self, definition: RegisterRequestDef) -> RegisterReadResult:
+        request_id = build_protocol_can_id(
+            self.src_addr,
+            self.dst_addr,
+            definition.msg_id,
+            definition.request_priority,
+        )
+        response_id = build_protocol_can_id(
+            self.dst_addr,
+            self.src_addr,
+            definition.msg_id,
+            definition.response_priority,
+        )
 
-        while (time.monotonic() - start) < self.total_timeout:
-            frame = self.client.read_frame(timeout_ms=100)
-            now = time.monotonic()
-
-            if frame is None:
-                if saw_relevant and last_relevant_rx is not None:
-                    if (now - last_relevant_rx) >= self.gap_timeout:
-                        break
-                continue
-
-            block_index, packet_index = resolve_block_packet(frame.can_id)
-            if block_index is None or packet_index is None:
-                continue
-
-            captures[block_index].packets[packet_index] = frame.data
-            saw_relevant = True
-            last_relevant_rx = now
-
-            if all(capture.is_complete() for capture in captures.values()):
-                break
-
-        return saw_relevant
-
-    def read_all(self) -> Dict[int, BlockCapture]:
-        captures = {
-            block_index: BlockCapture(block_index=block_index)
-            for block_index in CAN_BLOCK_BASE_IDS
-        }
-
+        last_error = "no response received"
         for attempt in range(1, self.attempts + 1):
-            print(f"Requesting registers over CAN (attempt {attempt}/{self.attempts})...")
-            saw_relevant = self.request_once(captures)
-            if all(capture.is_complete() for capture in captures.values()):
-                break
-            if not saw_relevant:
-                print("No register packets received on this attempt.")
-
-        return captures
-
-    def print_report(self, captures: Dict[int, BlockCapture]) -> bool:
-        any_complete = False
-
-        for block_index in sorted(CAN_BLOCK_BASE_IDS):
-            capture = captures[block_index]
-            base_id = capture.base_id
-            print("=" * 72)
             print(
-                f"Battery block {block_index + 1} "
-                f"(IDs 0x{base_id:03X}-0x{base_id + CAN_PACKETS_PER_BLOCK - 1:03X})"
+                f"Requesting {definition.name} "
+                f"(MSG_ID={definition.msg_id}, attempt {attempt}/{self.attempts})..."
             )
+            self.client.drain_rx()
 
-            if not capture.packets:
-                print("  No data received.")
+            if not self.client.send_frame(request_id, b"", is_extended_id=True):
+                last_error = "request transmit failed"
+                time.sleep(self.pause_s)
                 continue
 
-            missing = capture.missing_packets()
-            if missing:
-                missing_ids = ", ".join(f"0x{base_id + idx:03X}" for idx in missing)
-                print(
-                    f"  Incomplete block: received {len(capture.packets)}/"
-                    f"{CAN_PACKETS_PER_BLOCK} packets"
-                )
-                print(f"  Missing packet IDs: {missing_ids}")
+            payload = self.client.wait_for_id(
+                response_id,
+                timeout=self.request_timeout,
+                is_extended_id=True,
+            )
+            if payload is None:
+                last_error = "response timeout"
+                time.sleep(self.pause_s)
                 continue
 
             try:
-                payload = capture.assemble_payload()
-                registers = decode_registers(payload)
+                values = self._decode_response(definition, payload)
             except ValueError as exc:
-                print(f"  Decode error: {exc}")
+                last_error = str(exc)
+                time.sleep(self.pause_s)
                 continue
 
-            any_complete = True
-            for definition, raw_value in zip(REGISTER_LAYOUT, registers):
-                value = to_signed16(raw_value) if definition.signed else raw_value
+            time.sleep(self.pause_s)
+            return RegisterReadResult(
+                definition=definition,
+                request_id=request_id,
+                response_id=response_id,
+                values=values,
+                data=payload,
+            )
+
+        return RegisterReadResult(
+            definition=definition,
+            request_id=request_id,
+            response_id=response_id,
+            error=last_error,
+        )
+
+    def read_all(self) -> list[RegisterReadResult]:
+        return [self.request_register(definition) for definition in REQUEST_LAYOUT]
+
+    def print_report(self, results: list[RegisterReadResult]) -> bool:
+        all_ok = True
+        for result in results:
+            definition = result.definition
+            print("=" * 88)
+            print(definition.name)
+            print(f"  MSG_ID:      {definition.msg_id}")
+            print(f"  Request ID:  0x{result.request_id:X}")
+            print(f"  Response ID: 0x{result.response_id:X}")
+            print(f"  Description: {definition.description}")
+
+            if result.error is not None or result.values is None:
+                print(f"  Error:       {result.error or 'unknown error'}")
+                all_ok = False
+                continue
+
+            print(f"  Raw payload: {' '.join(f'{byte:02X}' for byte in result.data)}")
+            for index, value in enumerate(result.values):
                 print(
-                    f"  reg[{definition.index:02d}] "
-                    f"{definition.name:<24} = {value:7d} (0x{raw_value:04X})"
+                    f"  {channel_label(index):<24} = "
+                    f"{format_register_value(definition, value)}"
                 )
 
-        print("=" * 72)
-        return any_complete
+        print("=" * 88)
+        return all_ok
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="CandleLight CAN tool: register dump and firmware upload."
+        description="CandleLight CAN tool: TЗ register dump and firmware upload."
     )
     subparsers = parser.add_subparsers(dest="command")
 
     dump_parser = subparsers.add_parser(
         "dump",
-        help="Request all Modbus registers over CAN and print them.",
+        help="Request all CAN registers from the TЗ protocol and print them separately.",
     )
     dump_parser.add_argument("--bitrate", type=int, default=125000, help="CAN bitrate in bps.")
     dump_parser.add_argument(
         "--timeout",
         type=float,
-        default=DEFAULT_COLLECT_TIMEOUT,
-        help="Max collection time per request in seconds.",
-    )
-    dump_parser.add_argument(
-        "--gap-timeout",
-        type=float,
-        default=DEFAULT_GAP_TIMEOUT,
-        help="Stop reading after this idle gap once relevant frames started to arrive.",
+        default=DEFAULT_REQUEST_TIMEOUT,
+        help="Max wait time for one register response in seconds.",
     )
     dump_parser.add_argument(
         "--attempts",
         type=int,
-        default=DEFAULT_ATTEMPTS,
-        help="How many GET_REGS requests to send before giving up.",
+        default=DEFAULT_REQUEST_ATTEMPTS,
+        help="How many times to retry each register request before giving up.",
+    )
+    dump_parser.add_argument(
+        "--pause-ms",
+        type=int,
+        default=DEFAULT_REQUEST_PAUSE_MS,
+        help="Delay between register requests in milliseconds.",
+    )
+    dump_parser.add_argument(
+        "--src",
+        type=int,
+        default=CAN_PROTOCOL_ADDR_KOU,
+        help="SRC address for requests.",
+    )
+    dump_parser.add_argument(
+        "--dst",
+        type=int,
+        default=CAN_PROTOCOL_ADDR_IBP4K,
+        help="DST address for requests.",
     )
     dump_parser.add_argument(
         "--verbose",
@@ -542,6 +724,18 @@ def build_parser() -> argparse.ArgumentParser:
     upload_parser.add_argument("--master", action="store_true", help="Upload master firmware.")
     upload_parser.add_argument("--bitrate", type=int, default=125000, help="CAN bitrate in bps.")
     upload_parser.add_argument("--quiet", action="store_true", help="Minimal upload output.")
+    upload_parser.add_argument(
+        "--src",
+        type=int,
+        default=CAN_PROTOCOL_ADDR_KOU,
+        help="SRC address for update commands.",
+    )
+    upload_parser.add_argument(
+        "--dst",
+        type=int,
+        default=CAN_PROTOCOL_ADDR_IBP4K,
+        help="DST address for update commands.",
+    )
     upload_parser.add_argument(
         "--slave-num",
         type=int,
@@ -570,12 +764,14 @@ def run_dump(args: argparse.Namespace) -> int:
 
         dumper = RegisterDumper(
             client=client,
-            total_timeout=args.timeout,
-            gap_timeout=args.gap_timeout,
+            request_timeout=args.timeout,
             attempts=max(1, args.attempts),
+            pause_ms=max(0, args.pause_ms),
+            src_addr=args.src,
+            dst_addr=args.dst,
         )
-        captures = dumper.read_all()
-        return 0 if dumper.print_report(captures) else 2
+        results = dumper.read_all()
+        return 0 if dumper.print_report(results) else 2
     finally:
         client.disconnect()
 
@@ -595,6 +791,8 @@ def run_upload(args: argparse.Namespace) -> int:
             client=client,
             verbose=verbose,
             slave_num=args.slave_num,
+            src_addr=args.src,
+            dst_addr=args.dst,
         )
         if not uploader.load_firmware(args.firmware, is_master=args.master):
             return 1

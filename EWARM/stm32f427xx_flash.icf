@@ -5,7 +5,7 @@
 define symbol __ICFEDIT_intvec_start__ = 0x08040000;
 /*-Memory Regions-*/
 define symbol __ICFEDIT_region_ROM_start__    = 0x08040000;
-define symbol __ICFEDIT_region_ROM_end__      = 0x0805FFFF;
+define symbol __ICFEDIT_region_ROM_end__      = 0x0804FFFF;
 define symbol __ICFEDIT_region_RAM_start__    = 0x20000000;
 define symbol __ICFEDIT_region_RAM_end__      = 0x2002FFFF;
 define symbol __ICFEDIT_region_CCMRAM_start__ = 0x10000000;
@@ -32,8 +32,8 @@ do not initialize  { section .noinit };
 /* 1. Bootloader 0x0800 0000 - 0x0803 FFFF (256 KB) */
 define region FLASH_BOOT_region   = mem:[from 0x08000000 to 0x0803FFFF];
 
-/* 2. Application 0x0804 0000 - 0x0805 FFFF (128 KB) */
-define region FLASH_APP_region    = mem:[from 0x08040000 to 0x0805FFFF];
+/* 2. Application 0x0804 0000 - 0x0804 FFFF (64 KB linker window) */
+define region FLASH_APP_region    = mem:[from 0x08040000 to 0x0804FFFF];
 
 /* 3. UNUSED / параметры / логи 0x080C 0000 - 0x0811 FFFF (384 KB) */
 define region FLASH_UNUSED_region = mem:[from 0x080C0000 to 0x0811FFFF];

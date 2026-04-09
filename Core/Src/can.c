@@ -33,23 +33,18 @@ static const uint16_t canRequestMsgIds[] =
     CAN_MSG_LAST_ERROR_CODE
 };
 
-static const uint16_t canFirmwareStdIds[] =
+static const uint16_t canFirmwareMsgIds[] =
 {
-    CAN_FLAG_SLAWE_OS,
-    CAN_SLAWE_OS,
-    CAN_FLAG_OUR_OS,
-    CAN_OUR_OS,
-    CAN_SLAVE_UPDATE_START
+    CAN_MSG_FW_SLAVE_BEGIN,
+    CAN_MSG_FW_SLAVE_DATA,
+    CAN_MSG_FW_MASTER_BEGIN,
+    CAN_MSG_FW_MASTER_DATA,
+    CAN_MSG_FW_SLAVE_UPDATE_START
 };
 
 static uint32_t CAN_FilterEncodeExtendedId(uint32_t extId)
 {
     return (extId << 3) | CAN_ID_EXT;
-}
-
-static uint32_t CAN_FilterEncodeStandardId(uint16_t stdId)
-{
-    return ((uint32_t)stdId << 21);
 }
 
 static HAL_StatusTypeDef CAN_ConfigFilterBank(uint8_t bank, uint32_t encodedId1, uint32_t encodedId2)
@@ -73,7 +68,7 @@ static HAL_StatusTypeDef CAN_ConfigFilterBank(uint8_t bank, uint32_t encodedId1,
 static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
 {
     uint32_t encodedIds[(sizeof(canRequestMsgIds) / sizeof(canRequestMsgIds[0])) +
-                        (sizeof(canFirmwareStdIds) / sizeof(canFirmwareStdIds[0]))] = {0};
+                        (sizeof(canFirmwareMsgIds) / sizeof(canFirmwareMsgIds[0]))] = {0};
     size_t encodedCount = 0u;
 
     for (size_t index = 0u; index < (sizeof(canRequestMsgIds) / sizeof(canRequestMsgIds[0])); ++index)
@@ -82,9 +77,10 @@ static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
             CAN_BuildExtId(CAN_NODE_KOU, CAN_NODE_IBP_4K, canRequestMsgIds[index], CAN_PRIORITY_DEFAULT));
     }
 
-    for (size_t index = 0u; index < (sizeof(canFirmwareStdIds) / sizeof(canFirmwareStdIds[0])); ++index)
+    for (size_t index = 0u; index < (sizeof(canFirmwareMsgIds) / sizeof(canFirmwareMsgIds[0])); ++index)
     {
-        encodedIds[encodedCount++] = CAN_FilterEncodeStandardId(canFirmwareStdIds[index]);
+        encodedIds[encodedCount++] = CAN_FilterEncodeExtendedId(
+            CAN_BuildExtId(CAN_NODE_KOU, CAN_NODE_IBP_4K, canFirmwareMsgIds[index], CAN_PRIORITY_DEFAULT));
     }
 
     for (size_t index = 0u, bank = 0u; index < encodedCount; index += 2u, ++bank)
@@ -230,14 +226,17 @@ static uint16_t CAN_ComposeErrorFlags(uint8_t channelIndex)
     flags = (uint16_t)(data->error_flags & (CAN_ERROR_FLAG_BQ_ERROR | CAN_ERROR_FLAG_INA_ERROR));
     balanceDeltaMv = CAN_GetBalanceDeltaMv(data);
 
-    if (balanceDeltaMv >= CAN_BALANCE_WARNING_THRESHOLD_MV)
+    if (data->soc_percent == 100u)
     {
-        flags |= CAN_ERROR_FLAG_BALANCE_WARNING;
-    }
+        if (balanceDeltaMv >= CAN_BALANCE_WARNING_THRESHOLD_MV)
+        {
+            flags |= CAN_ERROR_FLAG_BALANCE_WARNING;
+        }
 
-    if (balanceDeltaMv > CAN_BALANCE_CRITICAL_THRESHOLD_MV)
-    {
-        flags |= CAN_ERROR_FLAG_BALANCE_CRITICAL;
+        if (balanceDeltaMv > CAN_BALANCE_CRITICAL_THRESHOLD_MV)
+        {
+            flags |= CAN_ERROR_FLAG_BALANCE_CRITICAL;
+        }
     }
 
     return flags;
@@ -363,8 +362,7 @@ static void CAN_BuildResponsePayload(uint16_t msgId, uint8_t payload[8])
 }
 
 static void CAN_SendFrame(CAN_HandleTypeDef *hcan,
-                          uint32_t id,
-                          uint32_t ide,
+                          uint32_t extId,
                           const uint8_t *data,
                           uint8_t dlc)
 {
@@ -388,18 +386,10 @@ static void CAN_SendFrame(CAN_HandleTypeDef *hcan,
     }
 
     txHeader.RTR = CAN_RTR_DATA;
-    txHeader.IDE = ide;
+    txHeader.IDE = CAN_ID_EXT;
     txHeader.DLC = dlc;
     txHeader.TransmitGlobalTime = DISABLE;
-
-    if (ide == CAN_ID_EXT)
-    {
-        txHeader.ExtId = id;
-    }
-    else
-    {
-        txHeader.StdId = id;
-    }
+    txHeader.ExtId = extId;
 
     if ((canContext.mutex != NULL) && (osMutexWait(canContext.mutex, osWaitForever) == osOK))
     {
@@ -612,20 +602,12 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
     }
 }
 
-void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan,
-                         uint32_t stdId,
-                         const uint8_t *data,
-                         uint8_t dlc)
-{
-    CAN_SendFrame(hcan, stdId, CAN_ID_STD, data, dlc);
-}
-
 void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
                            uint32_t extId,
                            const uint8_t *data,
                            uint8_t dlc)
 {
-    CAN_SendFrame(hcan, extId, CAN_ID_EXT, data, dlc);
+    CAN_SendFrame(hcan, extId, data, dlc);
 }
 
 void CAN_ReportFlashWriteError(void)

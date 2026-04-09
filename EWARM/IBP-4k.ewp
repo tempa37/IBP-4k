@@ -875,7 +875,7 @@
                 </option>
                 <option>
                     <name>FillerEnd</name>
-                    <state>0x0805FFFF</state>
+                    <state>0x0804FFFF</state>
                 </option>
                 <option>
                     <name>CrcSize</name>

@@ -66,15 +66,15 @@ extern "C" {
 #define FLASH_BOOT_SECTOR_COUNT   6
 
 // ============================================================================
-// 2. APPLICATION REGION (512 KB)
-// Sectors: 6, 7, 8, 9 (128K each)
+// 2. APPLICATION REGION (64 KB logical image limit)
+// Linked at the start of physical sector 6 (128 KB).
 // ============================================================================
 #define FLASH_APP_START_ADDR      0x08040000UL
-#define FLASH_APP_END_ADDR        0x0805FFFFUL
+#define FLASH_APP_END_ADDR        0x0804FFFFUL
 #define FLASH_APP_SIZE            (FLASH_APP_END_ADDR - FLASH_APP_START_ADDR + 1)
 #define FLASH_APP_START_SECTOR    FLASH_SECTOR_6
 #define FLASH_APP_END_SECTOR      FLASH_SECTOR_6
-#define FLASH_APP_SECTOR_COUNT    4
+#define FLASH_APP_SECTOR_COUNT    1
 
 // ============================================================================
 // 3. UNUSED GAP (384 KB)

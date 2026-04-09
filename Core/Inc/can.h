@@ -79,13 +79,13 @@ typedef struct
 #define CAN_BALANCE_WARNING_THRESHOLD_MV    50U
 #define CAN_BALANCE_CRITICAL_THRESHOLD_MV   100U
 
-/* Current firmware update IDs are kept unchanged. */
-#define CAN_FLAG_SLAWE_OS        0x4E1U
-#define CAN_SLAWE_OS             0x4E2U
-#define CAN_MASSAGE_OK           0x4E3U
-#define CAN_FLAG_OUR_OS          0x4E4U
-#define CAN_OUR_OS               0x4E5U
-#define CAN_SLAVE_UPDATE_START   0x4FAU
+/* Firmware update protocol uses extended CAN IDs addressed to CAN_NODE_IBP_4K. */
+#define CAN_MSG_FW_SLAVE_BEGIN          40U
+#define CAN_MSG_FW_SLAVE_DATA           41U
+#define CAN_MSG_FW_ACK                  42U
+#define CAN_MSG_FW_MASTER_BEGIN         43U
+#define CAN_MSG_FW_MASTER_DATA          44U
+#define CAN_MSG_FW_SLAVE_UPDATE_START   45U
 
 extern CanContext_t canContext;
 extern uint8_t CanlocalData[8];
@@ -94,10 +94,6 @@ void MX_CAN1_Init(void);
 uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priority);
 bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId, uint8_t *priority);
 bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan, uint32_t extId);
-void CAN_SendSimpleFrame(CAN_HandleTypeDef *hcan,
-                         uint32_t stdId,
-                         const uint8_t *data,
-                         uint8_t dlc);
 void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
                            uint32_t extId,
                            const uint8_t *data,
