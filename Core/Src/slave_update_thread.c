@@ -21,11 +21,12 @@
 
 
 
-/**
- * @brief Отправка данных слейву по UART с CRC16 (Modbus)
- * @param slave_num: номер слейва
- * @param data: указатель на данные
- * @param length: длина данных
+/*
+ * Низкоуровневая отправка одного куска данных в slave по UART.
+ *
+ * Почему здесь mutex:
+ * - UART-канал общий ресурс;
+ * - обновление не должно драться с другой активностью на том же порту.
  */
 void Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, uint8_t length)
 {
@@ -41,10 +42,13 @@ void Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, uint8_t
     }
 }
 
-/**
- * @brief Проверка получения ACK от слейва (0x79)
- * @param slave_num: номер слейва
- * @return true если ACK получен
+/*
+ * Проверка ACK от bootloader слейва.
+ *
+ * Принцип намеренно одноразовый:
+ * - если ACK считан, флаг сразу сбрасывается;
+ * - это защищает от повторного "использования" одного старого ACK на нескольких
+ *   фазах автомата.
  */
 bool Slave_CheckACK(uint8_t slave_num)
 {
@@ -60,9 +64,17 @@ bool Slave_CheckACK(uint8_t slave_num)
     return false;
 }
 
-/**
- * @brief Переход к следующему блоку данных
- * @param ctx: указатель на контекст обновления
+/*
+ * Подготовка следующего блока данных к отправке во slave.
+ *
+ * Важно по архитектуре:
+ * - источник данных теперь общий staging-слот мастера, а не отдельная slave-область;
+ * - размер отправки берётся из persistent metadata (slave.os_size_bytes);
+ * - здесь выбирается только длина следующего куска и следующая фаза автомата.
+ *
+ * Замечание:
+ * - сама подгрузка байт из flash в write_buffer у тебя всё ещё не реализована,
+ *   и это старый долг, который этот комментарий не магически чинит.
  */
 void Slave_NextDataBlock(SlaveUpdateContext_t *ctx)
 {
@@ -70,8 +82,7 @@ void Slave_NextDataBlock(SlaveUpdateContext_t *ctx)
     
     if (bytes_remaining > 0)
     {
-        // Читаем следующий блок из флеша master (где хранится FW slave)
-        // В данном примере используем фиксированный размер блока
+        // Берём следующий кусок уже сохранённого slave image из общего staging-слота.
         ctx->write_buffer_size = (bytes_remaining > SLAVE_FW_BLOCK_SIZE) 
                                   ? SLAVE_FW_BLOCK_SIZE 
                                   : bytes_remaining;
@@ -88,9 +99,14 @@ void Slave_NextDataBlock(SlaveUpdateContext_t *ctx)
     }
 }
 
-/**
- * @brief Основная функция обработки обновления слейва (запускается в Task04)
- * Вызывается периодически из StartTask04
+/*
+ * Основной конечный автомат прошивки слейва.
+ *
+ * Что нужно понимать:
+ * - этот код запускается периодически;
+ * - он не хранит образ, а только отправляет уже сохранённый образ слейву;
+ * - стартует только если есть и запрос need_update, и валидный сохранённый
+ *   slave image в общем staging-слоте.
  */
 void Slave_UpdateProcess(void)
 {
@@ -98,6 +114,7 @@ void Slave_UpdateProcess(void)
 
     if (SLAVE_FW_SEND_ENABLE == 0u)
     {
+        // Compile-time рубильник: логика полностью отключена.
         return;
     }
     
@@ -105,12 +122,21 @@ void Slave_UpdateProcess(void)
     {
         SlaveUpdateContext_t *ctx = &slave_update_ctx[slave_num];
         
-        // Проверяем, нужно ли начинать обновление
+        /*
+         * need_update означает "пора отправлять", а не "образ сохранён".
+         * Для реального старта нужны оба условия:
+         * - есть запрос на отправку конкретному slave;
+         * - в staging-слоте действительно лежит slave image известного размера.
+         */
         if (slave.device[slave_num].need_update && slave.os_in_flash && (slave.os_size_bytes > 0u))
         {
             if (ctx->phase == SLAVE_UPD_IDLE)
             {
-                // Инициализируем обновление
+                /*
+                 * current_address теперь указывает на общий staging-слот мастера.
+                 * То есть slave bootloader получает данные не из старого отдельного
+                 * slave-слота, а из общей области хранения образа.
+                 */
                 memset(ctx, 0, sizeof(SlaveUpdateContext_t));
                 ctx->slave_number = slave_num;
                 ctx->current_address = FLASH_FW_STORAGE_START_ADDR;

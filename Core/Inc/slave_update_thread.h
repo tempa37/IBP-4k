@@ -4,16 +4,15 @@
 #include "string.h"
 #include "modbuc.h"
 #include "uart.h"
-/**
- * @brief Процесс обновления прошивки слейва по протоколу STM32 Bootloader
- * Реализует алгоритм:
- * 1) Вход в bootloader (запись 0x1234 в регистр 0x0000)
- * 2) Синхронизация (0x7F)
- * 3) Стирание (0x44 + 0xBB)
- * 4) Mass Erase (0xFF 0xFF + 0x00)
- * 5) Команда записи (0x31 + 0xCE)
- * 6-8) Циклически: адрес (0x08 0x00 0x00 0x00 + 0x08) и данные (0xFF + data)
- * 9) На каждый пакет слейв отправляет ACK (0x79)
+/*
+ * Машина состояний прошивки слейва по STM32 bootloader over UART.
+ *
+ * Важная роль этого модуля:
+ * - он НЕ принимает образ по CAN;
+ * - он только берёт уже сохранённый образ из общего staging-слота мастера
+ *   и перекладывает его в конкретный slave по UART.
+ *
+ * То есть хранение образа и отправка образа - это две разные стадии.
  */
 
 /* Состояния процесса обновления слейва */
@@ -47,7 +46,13 @@ typedef enum {
     SLAVE_UPD_ERROR                    // Ошибка обновления
 } SlaveUpdatePhase_t;
 
-/* Структура для отслеживания процесса обновления */
+/*
+ * Контекст одной UART-сессии прошивки слейва.
+ *
+ * Здесь хранится именно процесс отправки во внешний slave:
+ * текущая фаза, адрес, сколько уже отправили, сколько ещё осталось,
+ * буфер текущего блока и служебные поля по таймаутам.
+ */
 typedef struct {
     SlaveUpdatePhase_t phase;          // Текущая фаза обновления
     uint8_t slave_number;              // Номер слейва (0-3)
@@ -67,16 +72,16 @@ static SlaveUpdateContext_t slave_update_ctx[UART_CHANNEL_COUNT] = {0};
 #define SLAVE_UPDATE_TIMEOUT_MS     5000u  // Таймаут ответа слейва
 #define SLAVE_UPDATE_RETRY_MAX      3u     // Максимум повторов
 #define SLAVE_FW_BLOCK_SIZE         256u   // Размер блока данных для записи
-#define SLAVE_FW_SEND_ENABLE        0u     // 0 - не отправлять прошивку слейву по UART
+#define SLAVE_FW_SEND_ENABLE        0u     // 0 - полностью отключить отправку слейв-прошивки по UART
 typedef struct {
     volatile uint8_t ack;
-    volatile uint8_t need_update;
+    volatile uint8_t need_update;         // Запрос на запуск отправки уже сохранённого slave image
 } SlaveDevice_t;
 
 typedef struct {
     SlaveDevice_t device[UART_CHANNEL_COUNT];
-    volatile uint8_t os_in_flash;
-    volatile uint32_t os_size_bytes;
+    volatile uint8_t os_in_flash;         // В общем staging-слоте лежит образ слейва
+    volatile uint32_t os_size_bytes;      // Размер сохранённого slave image в байтах
 } SlaveSystem_t;
 
 /* Глобальная переменная, определена в main.c */

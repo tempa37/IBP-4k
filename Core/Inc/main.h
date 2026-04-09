@@ -48,16 +48,31 @@ extern "C" {
 /* USER CODE BEGIN EM */
   
 
-#define FW_BLOCK_SIZE_PACKETS       10u    
-#define FW_PACKET_DATA_SIZE         6u      
-#define FW_BLOCK_SIZE_BYTES         (FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE)  
+/*
+ * Параметры транспортного протокола обновления по CAN.
+ *
+ * Прошивка передаётся не произвольными кусками, а блоками фиксированного
+ * размера. Один блок состоит из 10 CAN-пакетов, в каждом пакете полезных
+ * данных 6 байт. Итого один flash-блок приёма = 60 байт.
+ *
+ * Почему это важно:
+ * - по этим значениям считается ожидаемое количество блоков;
+ * - ими же задаётся размер временного буфера накопления;
+ * - паддинг последнего блока тоже завязан на эти константы.
+ */
+#define FW_BLOCK_SIZE_PACKETS       10u
+#define FW_PACKET_DATA_SIZE         6u
+#define FW_BLOCK_SIZE_BYTES         (FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE)
   
   
   
-// ============================================================================
-// 1. BOOTLOADER REGION (256 KB)
-// Sectors: 0, 1, 2, 3 (16K each), 4 (64K), 5 (128K)
-// ============================================================================
+/*
+ * Область bootloader.
+ *
+ * Здесь живёт загрузчик и его собственные данные. Приложение сюда писать
+ * не должно. Это отдельный мир, который отвечает за старт устройства и,
+ * потенциально, за перенос новой master-прошивки из staging-области в рабочую.
+ */
 #define FLASH_BOOT_START_ADDR     0x08000000UL
 #define FLASH_BOOT_END_ADDR       0x0803FFFFUL
 #define FLASH_BOOT_SIZE           (FLASH_BOOT_END_ADDR - FLASH_BOOT_START_ADDR + 1)
@@ -65,10 +80,15 @@ extern "C" {
 #define FLASH_BOOT_END_SECTOR     FLASH_SECTOR_5
 #define FLASH_BOOT_SECTOR_COUNT   6
 
-// ============================================================================
-// 2. APPLICATION REGION (64 KB logical image limit)
-// Linked at the start of physical sector 6 (128 KB).
-// ============================================================================
+/*
+ * Рабочая область приложения IBP-4k.
+ *
+ * Важно не путать:
+ * - это не staging-область, а именно текущая исполняемая прошивка;
+ * - логический лимит для образа здесь 64 KB;
+ * - физически адрес попадает в сектор 6 размером 128 KB, но линковка и логика
+ *   обновления считают допустимым только окно 64 KB.
+ */
 #define FLASH_APP_START_ADDR      0x08040000UL
 #define FLASH_APP_END_ADDR        0x0804FFFFUL
 #define FLASH_APP_SIZE            (FLASH_APP_END_ADDR - FLASH_APP_START_ADDR + 1)
@@ -76,20 +96,31 @@ extern "C" {
 #define FLASH_APP_END_SECTOR      FLASH_SECTOR_6
 #define FLASH_APP_SECTOR_COUNT    1
 
-// ============================================================================
-// 3. UNUSED GAP (384 KB)
-// Sectors: 10, 11 (Bank 1) & 12, 13, 14, 15, 16 (Bank 2 start)
-// Use this for params or logs if needed.
-// ============================================================================
+/*
+ * Сейчас неиспользуемый зазор во flash.
+ *
+ * Здесь нет активной логики обновления. Сектор 12 частично используется
+ * под metadata через отдельные адреса ниже, а остальной диапазон пока можно
+ * считать резервом на будущее.
+ */
 #define FLASH_UNUSED_START_ADDR   0x080C0000UL
 #define FLASH_UNUSED_END_ADDR     0x0811FFFFUL
 #define FLASH_UNUSED_SIZE         (FLASH_UNUSED_END_ADDR - FLASH_UNUSED_START_ADDR + 1)
 
-// ============================================================================
-// 4. SHARED FIRMWARE STAGING REGION (128 KB)
-// One common slot for either IBP-4k firmware or slave firmware.
-// Sector: 17 (128 KB)
-// ============================================================================
+/*
+ * Общая staging-область для принятого образа.
+ *
+ * Принцип работы теперь такой:
+ * - одновременно хранится только один образ;
+ * - сюда кладётся либо новая прошивка IBP-4k, либо прошивка слейва;
+ * - тип того, что лежит в этом слоте, определяется не по адресу, а по metadata;
+ * - новый приём всегда стирает предыдущий образ в этом слоте.
+ *
+ * Почему так:
+ * - не нужно держать две разные области под master и slave;
+ * - проще сопровождать и проще диагностировать состояние памяти;
+ * - после reset можно восстановить состояние по metadata, а не гадать.
+ */
 #define FLASH_FW_STORAGE_START_ADDR      0x08120000UL
 #define FLASH_FW_STORAGE_END_ADDR        0x0813FFFFUL
 #define FLASH_FW_STORAGE_SIZE            (FLASH_FW_STORAGE_END_ADDR - FLASH_FW_STORAGE_START_ADDR + 1)
@@ -97,24 +128,46 @@ extern "C" {
 #define FLASH_FW_STORAGE_END_SECTOR      FLASH_SECTOR_17
 #define FLASH_FW_STORAGE_SECTOR_COUNT    1
 
-// ============================================================================
-// 5. RESERVED GAP
-// Old slave staging slot is no longer used after moving to a shared slot.
-// ============================================================================
+/*
+ * Резерв.
+ *
+ * Раньше здесь была отдельная staging-область под slave firmware. После
+ * перехода на общий слот этот диапазон в текущей логике не участвует.
+ */
 #define FLASH_RESERVED_START_ADDR        0x081A0000UL
 #define FLASH_RESERVED_END_ADDR          0x081BFFFFUL
 #define FLASH_RESERVED_SIZE              (FLASH_RESERVED_END_ADDR - FLASH_RESERVED_START_ADDR + 1)
 
+/*
+ * Metadata сохранённого образа.
+ *
+ * Здесь лежат три слова:
+ * - update flag: нужен только для master-прошивки IBP-4k;
+ * - image type: что именно лежит в общем staging-слоте;
+ * - image size: размер образа в байтах.
+ *
+ * Принцип:
+ * - при сохранении slave image update flag остаётся "пустым";
+ * - при сохранении master image после успешного CRC сюда пишется и тип, и размер,
+ *   и update flag;
+ * - при старте приложения metadata читаются обратно и по ним восстанавливается
+ *   RAM-состояние.
+ */
 #define FLASH_UPDATE_FLAG_ADDR           0x08100000UL
 #define FLASH_STORED_IMAGE_TYPE_ADDR     (FLASH_UPDATE_FLAG_ADDR + 0x4u)
 #define FLASH_STORED_IMAGE_SIZE_ADDR     (FLASH_UPDATE_FLAG_ADDR + 0x8u)
 #define FLASH_UPDATE_FLAG_SECTOR         FLASH_SECTOR_12
 
+/* Значение "master-образ готов к применению bootloader'ом". */
 #define FLASH_UPDATE_FLAG_SET_VALUE      0x00001111UL
+/* Значение стёртого слова. Используется как "флаг не установлен". */
 #define FLASH_UPDATE_FLAG_CLEAR_VALUE    0xFFFFFFFFUL
 
+/* Значение "в staging-слоте нет валидного образа". */
 #define FLASH_STORED_IMAGE_TYPE_NONE_VALUE    0xFFFFFFFFUL
+/* Четырёхсимвольная сигнатура MAST: в общем слоте лежит новая master firmware. */
 #define FLASH_STORED_IMAGE_TYPE_MASTER_VALUE  0x4D415354UL
+/* Четырёхсимвольная сигнатура SLAV: в общем слоте лежит firmware слейва. */
 #define FLASH_STORED_IMAGE_TYPE_SLAVE_VALUE   0x534C4156UL
   
   

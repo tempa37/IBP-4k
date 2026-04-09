@@ -19,6 +19,19 @@ except ImportError:
     sys.exit(1)
 
 
+#
+# Параметры транспортного протокола обновления прошивки.
+#
+# Они должны совпадать с прошивкой приёмника:
+# - один логический блок = 10 CAN-пакетов;
+# - полезная нагрузка одного пакета = 6 байт;
+# - итого один блок записи/подтверждения = 60 байт.
+#
+# Отдельно важно:
+# - размер master firmware IBP-4k сейчас жёстко считается равным 64 KB;
+# - по этому размеру и uploader, и приёмник понимают, что это master image;
+# - всё, что меньше 64 KB, трактуется как slave image.
+#
 FW_BLOCK_SIZE_PACKETS = 10
 FW_PACKET_DATA_SIZE = 6
 FW_BLOCK_SIZE_BYTES = FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE
@@ -378,6 +391,16 @@ class CandleLightCanClient:
 
 
 class FirmwareUploader:
+    """
+    Отправитель прошивки по CAN для IBP-4k.
+
+    Важный принцип текущего протокола:
+    - uploader больше не выбирает реальное место хранения по адресу;
+    - он передаёт размер образа и блоки данных;
+    - приёмник по размеру решает, master это или slave;
+    - физически оба типа образов сохраняются в один общий staging-слот.
+    """
+
     def __init__(
         self,
         client: CandleLightCanClient,
@@ -407,6 +430,15 @@ class FirmwareUploader:
         )
 
     def load_firmware(self, path: Path, is_master: bool) -> bool:
+        """
+        Читает бинарник и определяет его логический тип по размеру.
+
+        Почему именно так:
+        - на стороне приёмника источник истины сейчас тоже размер образа;
+        - ключ `--master` здесь уже не может насильно переопределить тип;
+        - если пользователь выбрал не тот режим руками, uploader честно
+          предупреждает и продолжает с тем типом, который следует из размера.
+        """
         try:
             self.firmware = path.read_bytes()
         except Exception as exc:
@@ -431,6 +463,18 @@ class FirmwareUploader:
         return True
 
     def init_update(self) -> bool:
+        """
+        Запускает новую сессию обновления на приёмнике.
+
+        BEGIN-кадр содержит:
+        - total_blocks: сколько логических блоков по 60 байт надо принять;
+        - exact size: точный размер бинарника в байтах.
+
+        Это важно, потому что приёмник использует именно размер, чтобы:
+        - различить master/slave image;
+        - проверить согласованность size и total_blocks;
+        - понять, сколько байт реально писать в последнем блоке.
+        """
         init_id = self._command_id(
             CAN_PROTOCOL_MSG_FW_MASTER_BEGIN
             if self.is_master
@@ -465,6 +509,14 @@ class FirmwareUploader:
         return False
 
     def send_block(self, block_num: int) -> bool:
+        """
+        Отправляет один логический блок прошивки.
+
+        Один блок режется на 10 CAN-пакетов по 6 байт.
+        Последний неполный пакет и последний неполный блок добиваются 0xFF,
+        потому что транспорт работает фиксированными кусками, а реальный размер
+        образа приёмник уже знает из BEGIN-кадра.
+        """
         if self.firmware is None:
             return False
 
@@ -520,6 +572,17 @@ class FirmwareUploader:
         return True
 
     def post_upload(self) -> None:
+        """
+        Дополнительное действие после загрузки образа.
+
+        Для master firmware ничего не делаем:
+        - после успешного CRC приёмник сам ставит update-flag и уходит в reset.
+
+        Для slave firmware отправляется отдельная команда UPDATE_START:
+        - она не загружает новый образ по CAN;
+        - она только просит устройство начать UART-прошивку конкретного slave
+          уже сохранённым в staging-слоте образом.
+        """
         if self.is_master:
             return
 
@@ -535,6 +598,12 @@ class FirmwareUploader:
         )
 
     def upload(self) -> bool:
+        """
+        Полный цикл загрузки:
+        1. BEGIN;
+        2. последовательная отправка всех блоков;
+        3. пост-действие для slave image.
+        """
         if self.firmware is None:
             print("Firmware is not loaded.")
             return False

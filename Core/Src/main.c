@@ -103,8 +103,18 @@ volatile uint32_t iar_crc32 = 0;
 
 
 
-/**
- * @brief Структура состояния процесса обновления прошивки
+/*
+ * RAM-состояние одного сеанса приёма прошивки по CAN.
+ *
+ * Зачем структура нужна:
+ * - CAN приносит образ не целиком, а маленькими пакетами по 6 байт;
+ * - пакеты нужно собирать в блок и только потом писать блок во flash;
+ * - надо помнить тип образа, ожидаемое число блоков и текущий прогресс.
+ *
+ * Принцип:
+ * - на BEGIN структура инициализируется;
+ * - на DATA блок накапливается в blockBuffer;
+ * - после завершения данные о сохранённом образе переносятся в metadata во flash.
  */
 typedef struct {
     uint8_t imageKind;                 // Тип образа: master/slave
@@ -119,14 +129,25 @@ typedef struct {
     uint32_t bytesWritten;             // Сколько байт образа уже записано во flash
 } FirmwareUpdateState_t;
 
-#define FW_IMAGE_KIND_NONE      0u
-#define FW_IMAGE_KIND_MASTER    1u
-#define FW_IMAGE_KIND_SLAVE     2u
+#define FW_IMAGE_KIND_NONE      0u    /* В staging-слоте нет валидного образа. */
+#define FW_IMAGE_KIND_MASTER    1u    /* В staging-слоте лежит master firmware IBP-4k. */
+#define FW_IMAGE_KIND_SLAVE     2u    /* В staging-слоте лежит slave firmware. */
 
-// Состояния обновления для slave и master прошивок
+/*
+ * Два шаблона состояния нужны только для разделения логики master/slave.
+ * Физическая flash-область при этом одна общая, а активен в каждый момент
+ * только один сеанс, на который указывает activeFwState.
+ */
 static FirmwareUpdateState_t slaveFwState = {0};
 static FirmwareUpdateState_t masterFwState = {0};
 static FirmwareUpdateState_t *activeFwState = NULL;
+
+/*
+ * RAM-копия persistent metadata из flash.
+ *
+ * Эти переменные удобны для отладки и для остального кода приложения.
+ * Источник истины всё равно лежит во flash и на старте перечитывается заново.
+ */
 volatile uint32_t storedImageType = FW_IMAGE_KIND_NONE;
 volatile uint32_t storedImageSize = 0u;
 volatile uint32_t storedUpdateFlag = FLASH_UPDATE_FLAG_CLEAR_VALUE;
@@ -579,7 +600,7 @@ void BAT_SetIndicator(uint8_t battery)
     ModbusSlaveData_t *data = &modbusSlaveData[battery];
     
     volatile GPIO_PinState state = GPIO_PIN_SET;
-    
+    //volatile GPIO_PinState state = GPIO_PIN_RESET;
     
     //Если есть связь с блоком
     if(data->valid) 
@@ -926,7 +947,18 @@ void assert_failed(uint8_t *file, uint32_t line)
 #endif /* USE_FULL_ASSERT */
 
 
-/* Общая функция стирания диапазона секторов */
+/*
+ * Стирание диапазона flash-секторов.
+ *
+ * Это низкоуровневый helper без знания о типе прошивки.
+ * В логике обновления он используется как кирпичик для:
+ * - очистки общей staging-области перед новым приёмом;
+ * - полной перезаписи сектора metadata.
+ *
+ * Почему стирание вынесено отдельно:
+ * - легче централизованно работать с unlock/lock flash;
+ * - меньше риска, что разные ветки логики начнут стирать по-разному.
+ */
 HAL_StatusTypeDef FLASH_EraseSectors(uint32_t firstSector, uint32_t lastSector)
 {
     HAL_StatusTypeDef status;
@@ -945,7 +977,15 @@ HAL_StatusTypeDef FLASH_EraseSectors(uint32_t firstSector, uint32_t lastSector)
     return status;
 }
 
-/* Запись произвольного буфера во флеш побайтно (медленно, но надёжно) */
+/*
+ * Побайтная запись буфера во flash.
+ *
+ * Почему именно побайтно, а не словами:
+ * - транспорт отдаёт данные не обязательно выровненными под слово;
+ * - последний блок часто неполный;
+ * - здесь приоритет не скорость, а предсказуемая и простая запись ровно того
+ *   количества байт, которое реально относится к образу.
+ */
 HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress,
                                            const uint8_t *src,
                                            uint32_t length)
@@ -968,6 +1008,19 @@ HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress,
     return status;
 }
 
+/*
+ * Разбор BEGIN-пакета обновления.
+ *
+ * Что делает:
+ * - достаёт число блоков;
+ * - если отправитель передал точный размер, забирает и его;
+ * - если точного размера нет, грубо восстанавливает размер как blocks * 60.
+ *
+ * Почему это нужно:
+ * - транспортный формат эволюционировал, поэтому поддерживаются оба варианта;
+ * - вся дальнейшая логика выбора образа и проверки ожидаемого числа блоков
+ *   завязана именно на размере.
+ */
 static bool FW_ParseBeginRequest(const uint8_t *canData,
                                  uint8_t dataLength,
                                  uint16_t *totalBlocks,
@@ -1010,6 +1063,16 @@ static bool FW_ParseBeginRequest(const uint8_t *canData,
     return true;
 }
 
+/*
+ * Проверка согласованности metadata.
+ *
+ * Здесь не происходит определения типа образа "с нуля". Функция только отвечает
+ * на вопрос: можно ли доверять комбинации type + size, прочитанной из flash.
+ *
+ * Это защита от мусора после сбоя питания, битых записей и ручного ковыряния
+ * памяти. Если комбинация выглядит подозрительно, код потом переводит состояние
+ * в NONE, чтобы не жить в красивой, но лживой хуйне.
+ */
 static bool FW_IsStoredImageInfoValid(uint8_t imageKind, uint32_t imageSizeBytes)
 {
     if (imageKind == FW_IMAGE_KIND_NONE)
@@ -1032,6 +1095,12 @@ static bool FW_IsStoredImageInfoValid(uint8_t imageKind, uint32_t imageSizeBytes
     return false;
 }
 
+/*
+ * Перевод размера образа в ожидаемое число transport-блоков по 60 байт.
+ *
+ * Нужен как sanity-check: BEGIN не должен врать сам себе. Если отправитель
+ * заявил размер и число блоков, а математика не сходится, приём не запускаем.
+ */
 static uint16_t FW_CalculateExpectedBlocks(uint32_t imageSizeBytes)
 {
     if (imageSizeBytes == 0u)
@@ -1042,6 +1111,15 @@ static uint16_t FW_CalculateExpectedBlocks(uint32_t imageSizeBytes)
     return (uint16_t)((imageSizeBytes + FW_BLOCK_SIZE_BYTES - 1u) / FW_BLOCK_SIZE_BYTES);
 }
 
+/*
+ * Нормализация размера образа.
+ *
+ * Зачем нужна:
+ * - последний блок протокола всегда добивается паддингом до 60 байт;
+ * - master firmware имеет жёсткий логический размер 64 KB;
+ * - если отправитель прислал 64 KB + хвост паддинга в пределах одного блока,
+ *   это всё ещё надо считать master firmware, а не "непонятно чем".
+ */
 static uint32_t FW_NormalizeImageSize(uint32_t imageSizeBytes)
 {
     if ((imageSizeBytes >= FLASH_APP_SIZE) &&
@@ -1053,6 +1131,12 @@ static uint32_t FW_NormalizeImageSize(uint32_t imageSizeBytes)
     return imageSizeBytes;
 }
 
+/*
+ * Кодирование внутреннего enum типа образа в flash-сигнатуру.
+ *
+ * Во flash храним не просто 1/2, а читаемые сигнатуры MAST / SLAV.
+ * Так проще смотреть память руками и проще диагностировать состояние в отладке.
+ */
 static uint32_t FW_EncodeStoredImageType(uint8_t imageKind)
 {
     if (imageKind == FW_IMAGE_KIND_MASTER)
@@ -1068,6 +1152,12 @@ static uint32_t FW_EncodeStoredImageType(uint8_t imageKind)
     return FLASH_STORED_IMAGE_TYPE_NONE_VALUE;
 }
 
+/*
+ * Обратное преобразование flash-сигнатуры в enum образа.
+ *
+ * Всё, что не похоже на известные MAST / SLAV, считаем NONE. Это специально
+ * жёсткое поведение: неизвестное состояние лучше отбросить, чем тащить дальше.
+ */
 static uint8_t FW_DecodeStoredImageType(uint32_t rawType)
 {
     if (rawType == FLASH_STORED_IMAGE_TYPE_MASTER_VALUE)
@@ -1083,6 +1173,17 @@ static uint8_t FW_DecodeStoredImageType(uint32_t rawType)
     return FW_IMAGE_KIND_NONE;
 }
 
+/*
+ * Применение metadata к RAM-состоянию.
+ *
+ * Здесь нет записи во flash. Это только синхронизация оперативных переменных
+ * после чтения metadata или после успешной записи metadata.
+ *
+ * Отдельно важно:
+ * - если сохранён slave image, автоматически выставляются slave.os_in_flash
+ *   и slave.os_size_bytes;
+ * - если сохранён master image или ничего не сохранено, slave-флаги обнуляются.
+ */
 static void FW_ApplyStoredImageInfo(uint8_t imageKind,
                                     uint32_t imageSizeBytes,
                                     uint32_t updateFlagValue)
@@ -1105,6 +1206,18 @@ static void FW_ApplyStoredImageInfo(uint8_t imageKind,
     }
 }
 
+/*
+ * Загрузка metadata из flash на старте приложения.
+ *
+ * Принцип:
+ * 1. читаем сырые слова из сектора metadata;
+ * 2. декодируем тип;
+ * 3. проверяем, что комбинация type + size валидна;
+ * 4. переносим результат в RAM-переменные.
+ *
+ * Так приложение после reset понимает, что именно сейчас лежит в общем
+ * staging-слоте, не пытаясь гадать по адресам или по остаткам старых флагов.
+ */
 static void FW_LoadStoredImageInfo(void)
 {
     uint32_t rawUpdateFlag = *(const uint32_t *)FLASH_UPDATE_FLAG_ADDR;
@@ -1122,6 +1235,20 @@ static void FW_LoadStoredImageInfo(void)
     FW_ApplyStoredImageInfo(imageKind, imageSizeBytes, rawUpdateFlag);
 }
 
+/*
+ * Полная перезапись metadata во flash.
+ *
+ * Почему функция стирает весь сектор:
+ * - flash STM32 нельзя надёжно "дописать поверх" произвольного старого слова;
+ * - metadata и update-flag живут в одном секторе;
+ * - поэтому запись любого из этих полей всегда считается атомарным обновлением
+ *   всей тройки: update flag + image type + image size.
+ *
+ * Что важно понимать:
+ * - новый приём образа сначала очищает metadata до NONE;
+ * - сохранение slave image пишет тип и размер, но оставляет update-flag пустым;
+ * - сохранение master image после CRC пишет и тип, и размер, и update-flag.
+ */
 static HAL_StatusTypeDef FW_WriteStoredImageInfo(uint8_t imageKind,
                                                  uint32_t imageSizeBytes,
                                                  uint32_t updateFlagValue)
@@ -1184,6 +1311,18 @@ static HAL_StatusTypeDef FW_WriteStoredImageInfo(uint8_t imageKind,
     return status;
 }
 
+/*
+ * Выбор логического типа принимаемого образа.
+ *
+ * На этапе приёма решение пока всё ещё принимается по размеру:
+ * - ровно 64 KB => master firmware;
+ * - меньше 64 KB => slave firmware.
+ *
+ * Почему здесь это всё ещё так:
+ * - транспортный протокол пока не передаёт явный тип образа отдельным полем;
+ * - message ID больше не используется как источник истины;
+ * - после завершения приёма тип уже фиксируется в metadata как persistent-флаг.
+ */
 static FirmwareUpdateState_t *FW_SelectStateByImageSize(uint32_t imageSizeBytes)
 {
     if (imageSizeBytes == FLASH_APP_SIZE)
@@ -1201,6 +1340,12 @@ static FirmwareUpdateState_t *FW_SelectStateByImageSize(uint32_t imageSizeBytes)
     return NULL;
 }
 
+/*
+ * Возврат физического адреса начала staging-слота.
+ *
+ * Несмотря на наличие двух логических состояний (master/slave), реальный слот
+ * теперь один общий. Поэтому обе ветки возвращают один и тот же адрес.
+ */
 static uint32_t FW_GetStorageStartAddress(const FirmwareUpdateState_t *state)
 {
     if ((state == &masterFwState) || (state == &slaveFwState))
@@ -1211,6 +1356,12 @@ static uint32_t FW_GetStorageStartAddress(const FirmwareUpdateState_t *state)
     return 0u;
 }
 
+/*
+ * Стирание общей staging-области.
+ *
+ * Логика простая: новый приём любого образа полностью вытесняет предыдущий.
+ * Поэтому отдельного erase для master/slave больше нет, а стирается общий слот.
+ */
 static HAL_StatusTypeDef FW_EraseStorageForState(FirmwareUpdateState_t *state)
 {
     if ((state == &masterFwState) || (state == &slaveFwState))
@@ -1226,6 +1377,17 @@ static HAL_StatusTypeDef FW_EraseStorageForState(FirmwareUpdateState_t *state)
     return HAL_ERROR;
 }
 
+/*
+ * Проверка CRC сохранённого образа.
+ *
+ * Сейчас эта функция реально используется только для master firmware IBP-4k.
+ * Для slave image CRC-проверка на этапе хранения отключена по текущему ТЗ.
+ *
+ * Принцип:
+ * - считаем CRC по образу без последних 4 байт;
+ * - последние 4 байта считаем сохранённым эталонным CRC;
+ * - сравниваем значения и возвращаем результат.
+ */
 static bool FW_VerifyStoredImageCrc(const FirmwareUpdateState_t *state,
                                     uint32_t *calculatedCrc,
                                     uint32_t *storedCrc)
@@ -1258,17 +1420,15 @@ static bool FW_VerifyStoredImageCrc(const FirmwareUpdateState_t *state,
     return (*calculatedCrc == *storedCrc);
 }
 
-/**
- * @brief Обработка одного пакета с данными прошивки
- * @param state: указатель на структуру состояния обновления (slave или master)
- * @param canData: массив данных из CAN-кадра: [index_hi][index_lo][data0]...[data5]
- * @param dataLength: длина данных в CAN-кадре (обычно 8)
- * 
- * Формат пакета:
- *   canData[0-1]: глобальный индекс пакета (big-endian)
- *   canData[2-7]: до 6 байт данных прошивки
+/*
+ * Отправка ACK по CAN для протокола обновления.
+ *
+ * ACK используется в двух местах:
+ * - после BEGIN приёмник сообщает состояние стирания/готовности;
+ * - после записи блока приёмник подтверждает номер записанного блока.
+ *
+ * Это отдельная функция, чтобы формат extended ACK не размазывался по коду.
  */
-/* Extended firmware-update helpers. */
 static void FW_SendAck(uint8_t dstNode, const uint8_t *data, uint8_t dlc)
 {
     uint32_t ackId = CAN_BuildExtId(CAN_NODE_IBP_4K,
@@ -1297,6 +1457,21 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
         case CAN_MSG_FW_SLAVE_BEGIN:
         case CAN_MSG_FW_MASTER_BEGIN:
         {
+            /*
+             * BEGIN master/slave теперь обрабатываются одинаково.
+             *
+             * Принцип:
+             * 1. читаем размер и число блоков;
+             * 2. по размеру определяем, master это или slave;
+             * 3. стираем общий staging-слот;
+             * 4. очищаем metadata до NONE;
+             * 5. запускаем новый активный сеанс приёма.
+             *
+             * Почему так:
+             * - физическая область хранения одна;
+             * - старый образ должен исчезнуть до начала нового приёма;
+             * - metadata не должны врать, если новый приём оборвётся посередине.
+             */
             uint16_t totalBlocks = 0u;
             uint32_t imageSizeBytes = 0u;
             bool imageSizeExact = false;
@@ -1368,6 +1543,11 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
 
         case CAN_MSG_FW_SLAVE_DATA:
         case CAN_MSG_FW_MASTER_DATA:
+            /*
+             * DATA для master и slave тоже идут в один обработчик.
+             * Источник истины здесь не message ID, а activeFwState, который был
+             * выбран и инициализирован на этапе BEGIN.
+             */
             FW_HandleDataPacket(activeFwState, srcNode, canData, dataLength);
             return true;
 
@@ -1402,7 +1582,24 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
     }
 }
 
-/* Firmware payload receiver. */
+/*
+ * Приём и запись payload-блоков прошивки.
+ *
+ * Это центральная транспортная функция обновления.
+ *
+ * Что она делает:
+ * - принимает один CAN-пакет;
+ * - кладёт его 6 байт в нужное место blockBuffer;
+ * - когда блок собран, пишет его в staging flash;
+ * - на последнем блоке завершает сеанс.
+ *
+ * Что важно по принципу:
+ * - блоки считаются логическими кусками по 60 байт;
+ * - физически master и slave пишутся в одну staging-область;
+ * - различие между ними проявляется только на этапе завершения:
+ *   master проверяет CRC и ставит update-flag,
+ *   slave только фиксирует metadata о сохранённом образе.
+ */
 static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                                 uint8_t dstNode,
                                 const uint8_t *canData,
@@ -1514,7 +1711,14 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
         // Очищаем буфер для следующего блока
         memset(state->blockBuffer, 0xFF, sizeof(state->blockBuffer));
 
-        // Если записали все блоки - завершаем обновление
+        /*
+         * Если записали все блоки - завершаем обновление.
+         *
+         * Развилка намеренно разная:
+         * - master: проверяем CRC, записываем metadata и ставим update-flag;
+         * - slave: просто записываем metadata о том, что в общем слоте лежит
+         *   slave image такого-то размера.
+         */
         if (state->currentBlockNum >= state->totalBlocksExpected)
         {
             state->updateInProgress = false;
@@ -1568,6 +1772,15 @@ const uint16_t __attribute__((used)) lookup_table[256] = {
 
 
 
+/*
+ * Программный расчёт CRC32 по данным во flash.
+ *
+ * Почему функция общая:
+ * - раньше была жёсткая привязка к старому слоту master firmware;
+ * - теперь слот общий, поэтому функция принимает адрес и длину параметрами.
+ *
+ * На практике сейчас используется для master firmware.
+ */
 uint32_t compute_flash_crc(uint32_t startAddress, uint32_t length) 
 {
 
@@ -1600,10 +1813,18 @@ uint32_t compute_flash_crc(uint32_t startAddress, uint32_t length)
 }
 
 
-/**
-  * @brief  Устанавливает флаг обновления прошивки (0x1111)
-  * @retval HAL_OK если успешно
-  */
+/*
+ * Фиксация готовности новой master firmware к применению.
+ *
+ * Что делает:
+ * - пишет во flash metadata типа MAST и размер образа;
+ * - ставит update-flag 0x1111;
+ * - после успешной записи инициирует reset.
+ *
+ * Почему reset именно здесь:
+ * - только после успешной записи metadata bootloader сможет понять,
+ *   что в staging-слоте лежит валидная master firmware для применения.
+ */
 HAL_StatusTypeDef Set_Update_Flag(uint32_t imageSizeBytes)
 {
     HAL_StatusTypeDef status = FW_WriteStoredImageInfo(FW_IMAGE_KIND_MASTER,
