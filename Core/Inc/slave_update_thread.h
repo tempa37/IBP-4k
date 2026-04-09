@@ -67,9 +67,7 @@ static SlaveUpdateContext_t slave_update_ctx[UART_CHANNEL_COUNT] = {0};
 #define SLAVE_UPDATE_TIMEOUT_MS     5000u  // Таймаут ответа слейва
 #define SLAVE_UPDATE_RETRY_MAX      3u     // Максимум повторов
 #define SLAVE_FW_BLOCK_SIZE         256u   // Размер блока данных для записи
-#define SLAVE_OS_SIZE               0x8000u   // 32 KB
-
-
+#define SLAVE_FW_SEND_ENABLE        0u     // 0 - не отправлять прошивку слейву по UART
 typedef struct {
     volatile uint8_t ack;
     volatile uint8_t need_update;
@@ -78,6 +76,7 @@ typedef struct {
 typedef struct {
     SlaveDevice_t device[UART_CHANNEL_COUNT];
     volatile uint8_t os_in_flash;
+    volatile uint32_t os_size_bytes;
 } SlaveSystem_t;
 
 /* Глобальная переменная, определена в main.c */

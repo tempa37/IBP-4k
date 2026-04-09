@@ -107,17 +107,29 @@ volatile uint32_t iar_crc32 = 0;
  * @brief Структура состояния процесса обновления прошивки
  */
 typedef struct {
+    uint8_t imageKind;                 // Тип образа: master/slave
     bool updateInProgress;              // Флаг: идет процесс обновления
+    bool imageSizeExact;               // Размер передан точно, а не выведен из количества блоков
     uint16_t totalBlocksExpected;       // Общее количество блоков к записи
     uint16_t currentBlockNum;           // Номер текущего блока (0, 1, 2, ...)
     uint8_t packetsInCurrentBlock;      // Сколько пакетов уже получено в текущем блоке (0..9)
-    uint8_t blockBuffer[60];            // Буфер для накопления 10 пакетов (10 * 6 = 60 байт)
+    uint8_t blockBuffer[FW_BLOCK_SIZE_BYTES]; // Буфер для накопления одного блока
     uint32_t writeAddress;              // Текущий адрес записи во flash
+    uint32_t imageSizeBytes;           // Фактический размер принятого образа
+    uint32_t bytesWritten;             // Сколько байт образа уже записано во flash
 } FirmwareUpdateState_t;
+
+#define FW_IMAGE_KIND_NONE      0u
+#define FW_IMAGE_KIND_MASTER    1u
+#define FW_IMAGE_KIND_SLAVE     2u
 
 // Состояния обновления для slave и master прошивок
 static FirmwareUpdateState_t slaveFwState = {0};
 static FirmwareUpdateState_t masterFwState = {0};
+static FirmwareUpdateState_t *activeFwState = NULL;
+volatile uint32_t storedImageType = FW_IMAGE_KIND_NONE;
+volatile uint32_t storedImageSize = 0u;
+volatile uint32_t storedUpdateFlag = FLASH_UPDATE_FLAG_CLEAR_VALUE;
 
 /* USER CODE END PV */
 
@@ -145,10 +157,31 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
 
 static void FW_SendAck(uint8_t dstNode, const uint8_t *data, uint8_t dlc);
 static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canData, uint8_t dataLength);
-uint32_t compute_flash_myos_crc(void);
+static bool FW_ParseBeginRequest(const uint8_t *canData,
+                                 uint8_t dataLength,
+                                 uint16_t *totalBlocks,
+                                 uint32_t *imageSizeBytes,
+                                 bool *imageSizeExact);
+static bool FW_IsStoredImageInfoValid(uint8_t imageKind, uint32_t imageSizeBytes);
+static uint16_t FW_CalculateExpectedBlocks(uint32_t imageSizeBytes);
+static uint32_t FW_NormalizeImageSize(uint32_t imageSizeBytes);
+static FirmwareUpdateState_t *FW_SelectStateByImageSize(uint32_t imageSizeBytes);
+static uint32_t FW_GetStorageStartAddress(const FirmwareUpdateState_t *state);
+static HAL_StatusTypeDef FW_EraseStorageForState(FirmwareUpdateState_t *state);
+static uint32_t FW_EncodeStoredImageType(uint8_t imageKind);
+static uint8_t FW_DecodeStoredImageType(uint32_t rawType);
+static void FW_ApplyStoredImageInfo(uint8_t imageKind, uint32_t imageSizeBytes, uint32_t updateFlagValue);
+static void FW_LoadStoredImageInfo(void);
+static HAL_StatusTypeDef FW_WriteStoredImageInfo(uint8_t imageKind,
+                                                 uint32_t imageSizeBytes,
+                                                 uint32_t updateFlagValue);
+static bool FW_VerifyStoredImageCrc(const FirmwareUpdateState_t *state,
+                                    uint32_t *calculatedCrc,
+                                    uint32_t *storedCrc);
+uint32_t compute_flash_crc(uint32_t startAddress, uint32_t length);
 
 
-HAL_StatusTypeDef Set_Update_Flag(void);
+HAL_StatusTypeDef Set_Update_Flag(uint32_t imageSizeBytes);
 void CheckConnectionTimeout(void);
 
 
@@ -201,6 +234,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  FW_LoadStoredImageInfo();
 
   /* USER CODE END Init */
 
@@ -934,7 +968,295 @@ HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress,
     return status;
 }
 
+static bool FW_ParseBeginRequest(const uint8_t *canData,
+                                 uint8_t dataLength,
+                                 uint16_t *totalBlocks,
+                                 uint32_t *imageSizeBytes,
+                                 bool *imageSizeExact)
+{
+    uint16_t parsedBlocks = 0u;
+    uint32_t parsedSize = 0u;
+    bool parsedSizeIsExact = false;
 
+    if ((canData == NULL) || (totalBlocks == NULL) || (imageSizeBytes == NULL) || (imageSizeExact == NULL))
+    {
+        return false;
+    }
+
+    if (dataLength < 2u)
+    {
+        return false;
+    }
+
+    parsedBlocks = (uint16_t)((canData[0] << 8) | canData[1]);
+
+    if (dataLength >= 6u)
+    {
+        parsedSize = ((uint32_t)canData[2] << 24)
+                   | ((uint32_t)canData[3] << 16)
+                   | ((uint32_t)canData[4] << 8)
+                   | (uint32_t)canData[5];
+        parsedSizeIsExact = true;
+    }
+    else
+    {
+        parsedSize = (uint32_t)parsedBlocks * FW_BLOCK_SIZE_BYTES;
+    }
+
+    *totalBlocks = parsedBlocks;
+    *imageSizeBytes = FW_NormalizeImageSize(parsedSize);
+    *imageSizeExact = parsedSizeIsExact;
+
+    return true;
+}
+
+static bool FW_IsStoredImageInfoValid(uint8_t imageKind, uint32_t imageSizeBytes)
+{
+    if (imageKind == FW_IMAGE_KIND_NONE)
+    {
+        return (imageSizeBytes == 0u);
+    }
+
+    if (imageKind == FW_IMAGE_KIND_MASTER)
+    {
+        return (imageSizeBytes == FLASH_APP_SIZE);
+    }
+
+    if (imageKind == FW_IMAGE_KIND_SLAVE)
+    {
+        return ((imageSizeBytes > 0u) &&
+                (imageSizeBytes < FLASH_APP_SIZE) &&
+                (imageSizeBytes <= FLASH_FW_STORAGE_SIZE));
+    }
+
+    return false;
+}
+
+static uint16_t FW_CalculateExpectedBlocks(uint32_t imageSizeBytes)
+{
+    if (imageSizeBytes == 0u)
+    {
+        return 0u;
+    }
+
+    return (uint16_t)((imageSizeBytes + FW_BLOCK_SIZE_BYTES - 1u) / FW_BLOCK_SIZE_BYTES);
+}
+
+static uint32_t FW_NormalizeImageSize(uint32_t imageSizeBytes)
+{
+    if ((imageSizeBytes >= FLASH_APP_SIZE) &&
+        (imageSizeBytes <= (FLASH_APP_SIZE + FW_BLOCK_SIZE_BYTES - 1u)))
+    {
+        return FLASH_APP_SIZE;
+    }
+
+    return imageSizeBytes;
+}
+
+static uint32_t FW_EncodeStoredImageType(uint8_t imageKind)
+{
+    if (imageKind == FW_IMAGE_KIND_MASTER)
+    {
+        return FLASH_STORED_IMAGE_TYPE_MASTER_VALUE;
+    }
+
+    if (imageKind == FW_IMAGE_KIND_SLAVE)
+    {
+        return FLASH_STORED_IMAGE_TYPE_SLAVE_VALUE;
+    }
+
+    return FLASH_STORED_IMAGE_TYPE_NONE_VALUE;
+}
+
+static uint8_t FW_DecodeStoredImageType(uint32_t rawType)
+{
+    if (rawType == FLASH_STORED_IMAGE_TYPE_MASTER_VALUE)
+    {
+        return FW_IMAGE_KIND_MASTER;
+    }
+
+    if (rawType == FLASH_STORED_IMAGE_TYPE_SLAVE_VALUE)
+    {
+        return FW_IMAGE_KIND_SLAVE;
+    }
+
+    return FW_IMAGE_KIND_NONE;
+}
+
+static void FW_ApplyStoredImageInfo(uint8_t imageKind,
+                                    uint32_t imageSizeBytes,
+                                    uint32_t updateFlagValue)
+{
+    storedImageType = imageKind;
+    storedImageSize = imageSizeBytes;
+    storedUpdateFlag = (updateFlagValue == FLASH_UPDATE_FLAG_SET_VALUE)
+                     ? FLASH_UPDATE_FLAG_SET_VALUE
+                     : FLASH_UPDATE_FLAG_CLEAR_VALUE;
+
+    if ((imageKind == FW_IMAGE_KIND_SLAVE) && (imageSizeBytes > 0u))
+    {
+        slave.os_in_flash = 1u;
+        slave.os_size_bytes = imageSizeBytes;
+    }
+    else
+    {
+        slave.os_in_flash = 0u;
+        slave.os_size_bytes = 0u;
+    }
+}
+
+static void FW_LoadStoredImageInfo(void)
+{
+    uint32_t rawUpdateFlag = *(const uint32_t *)FLASH_UPDATE_FLAG_ADDR;
+    uint32_t rawImageType = *(const uint32_t *)FLASH_STORED_IMAGE_TYPE_ADDR;
+    uint32_t rawImageSize = *(const uint32_t *)FLASH_STORED_IMAGE_SIZE_ADDR;
+    uint8_t imageKind = FW_DecodeStoredImageType(rawImageType);
+    uint32_t imageSizeBytes = rawImageSize;
+
+    if (!FW_IsStoredImageInfoValid(imageKind, imageSizeBytes))
+    {
+        imageKind = FW_IMAGE_KIND_NONE;
+        imageSizeBytes = 0u;
+    }
+
+    FW_ApplyStoredImageInfo(imageKind, imageSizeBytes, rawUpdateFlag);
+}
+
+static HAL_StatusTypeDef FW_WriteStoredImageInfo(uint8_t imageKind,
+                                                 uint32_t imageSizeBytes,
+                                                 uint32_t updateFlagValue)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+    FLASH_EraseInitTypeDef eraseInit = {0};
+    uint32_t sectorError = 0u;
+    uint32_t rawImageType = FW_EncodeStoredImageType(imageKind);
+
+    if (!FW_IsStoredImageInfoValid(imageKind, imageSizeBytes))
+    {
+        return HAL_ERROR;
+    }
+
+    if ((updateFlagValue != FLASH_UPDATE_FLAG_SET_VALUE) &&
+        (updateFlagValue != FLASH_UPDATE_FLAG_CLEAR_VALUE))
+    {
+        return HAL_ERROR;
+    }
+
+    eraseInit.TypeErase = FLASH_TYPEERASE_SECTORS;
+    eraseInit.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+    eraseInit.Sector = FLASH_UPDATE_FLAG_SECTOR;
+    eraseInit.NbSectors = 1u;
+
+    HAL_FLASH_Unlock();
+
+    status = HAL_FLASHEx_Erase(&eraseInit, &sectorError);
+    if (status == HAL_OK)
+    {
+        if (updateFlagValue != FLASH_UPDATE_FLAG_CLEAR_VALUE)
+        {
+            status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                                       FLASH_UPDATE_FLAG_ADDR,
+                                       updateFlagValue);
+        }
+
+        if ((status == HAL_OK) && (rawImageType != FLASH_STORED_IMAGE_TYPE_NONE_VALUE))
+        {
+            status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                                       FLASH_STORED_IMAGE_TYPE_ADDR,
+                                       rawImageType);
+        }
+
+        if ((status == HAL_OK) && (imageSizeBytes != 0u))
+        {
+            status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                                       FLASH_STORED_IMAGE_SIZE_ADDR,
+                                       imageSizeBytes);
+        }
+    }
+
+    HAL_FLASH_Lock();
+
+    if (status == HAL_OK)
+    {
+        FW_ApplyStoredImageInfo(imageKind, imageSizeBytes, updateFlagValue);
+    }
+
+    return status;
+}
+
+static FirmwareUpdateState_t *FW_SelectStateByImageSize(uint32_t imageSizeBytes)
+{
+    if (imageSizeBytes == FLASH_APP_SIZE)
+    {
+        return &masterFwState;
+    }
+
+    if ((imageSizeBytes > 0u) &&
+        (imageSizeBytes < FLASH_APP_SIZE) &&
+        (imageSizeBytes <= FLASH_FW_STORAGE_SIZE))
+    {
+        return &slaveFwState;
+    }
+
+    return NULL;
+}
+
+static uint32_t FW_GetStorageStartAddress(const FirmwareUpdateState_t *state)
+{
+    if ((state == &masterFwState) || (state == &slaveFwState))
+    {
+        return FLASH_FW_STORAGE_START_ADDR;
+    }
+
+    return 0u;
+}
+
+static HAL_StatusTypeDef FW_EraseStorageForState(FirmwareUpdateState_t *state)
+{
+    if ((state == &masterFwState) || (state == &slaveFwState))
+    {
+        HAL_StatusTypeDef eraseStatus;
+
+        taskENTER_CRITICAL();
+        eraseStatus = FLASH_EraseSectors(FLASH_FW_STORAGE_START_SECTOR, FLASH_FW_STORAGE_END_SECTOR);
+        taskEXIT_CRITICAL();
+        return eraseStatus;
+    }
+
+    return HAL_ERROR;
+}
+
+static bool FW_VerifyStoredImageCrc(const FirmwareUpdateState_t *state,
+                                    uint32_t *calculatedCrc,
+                                    uint32_t *storedCrc)
+{
+    uint32_t imageStart = 0u;
+    uint32_t payloadLength = 0u;
+    const uint8_t *crcPtr;
+
+    if ((state == NULL) || (state->imageSizeBytes < sizeof(uint32_t)) ||
+        (calculatedCrc == NULL) || (storedCrc == NULL))
+    {
+        return false;
+    }
+
+    imageStart = FW_GetStorageStartAddress(state);
+    if (imageStart == 0u)
+    {
+        return false;
+    }
+
+    payloadLength = state->imageSizeBytes - sizeof(uint32_t);
+    *calculatedCrc = compute_flash_crc(imageStart, payloadLength);
+
+    crcPtr = (const uint8_t *)(imageStart + payloadLength);
+    *storedCrc = ((uint32_t)crcPtr[0])
+               | ((uint32_t)crcPtr[1] << 8)
+               | ((uint32_t)crcPtr[2] << 16)
+               | ((uint32_t)crcPtr[3] << 24);
+
+    return (*calculatedCrc == *storedCrc);
+}
 
 /**
  * @brief Обработка одного пакета с данными прошивки
@@ -973,34 +1295,68 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
     switch (msgId)
     {
         case CAN_MSG_FW_SLAVE_BEGIN:
+        case CAN_MSG_FW_MASTER_BEGIN:
         {
             uint16_t totalBlocks = 0u;
+            uint32_t imageSizeBytes = 0u;
+            bool imageSizeExact = false;
             uint8_t responseData[1] = {0u};
-            HAL_StatusTypeDef eraseStatus;
+            HAL_StatusTypeDef eraseStatus = HAL_ERROR;
+            HAL_StatusTypeDef metadataStatus = HAL_ERROR;
+            FirmwareUpdateState_t *selectedState = NULL;
 
-            if (dataLength >= 2u)
+            if (!FW_ParseBeginRequest(canData,
+                                      dataLength,
+                                      &totalBlocks,
+                                      &imageSizeBytes,
+                                      &imageSizeExact))
             {
-                totalBlocks = (uint16_t)((canData[0] << 8) | canData[1]);
+                FW_SendAck(srcNode, responseData, 1u);
+                return true;
             }
 
-            eraseStatus = FLASH_EraseSectors(FLASH_SLAVEOS_START_SECTOR, FLASH_SLAVEOS_END_SECTOR);
+            selectedState = FW_SelectStateByImageSize(imageSizeBytes);
+            if ((selectedState != NULL) &&
+                (totalBlocks == FW_CalculateExpectedBlocks(imageSizeBytes)))
+            {
+                eraseStatus = FW_EraseStorageForState(selectedState);
+                if (eraseStatus == HAL_OK)
+                {
+                    metadataStatus = FW_WriteStoredImageInfo(FW_IMAGE_KIND_NONE,
+                                                             0u,
+                                                             FLASH_UPDATE_FLAG_CLEAR_VALUE);
+                }
+            }
 
-            if ((eraseStatus == HAL_OK) && (totalBlocks > 0u))
+            if ((selectedState != NULL) &&
+                (eraseStatus == HAL_OK) &&
+                (metadataStatus == HAL_OK) &&
+                (totalBlocks == FW_CalculateExpectedBlocks(imageSizeBytes)))
             {
                 memset(&slaveFwState, 0, sizeof(slaveFwState));
-                slaveFwState.updateInProgress = true;
-                slaveFwState.totalBlocksExpected = totalBlocks;
-                slaveFwState.currentBlockNum = 0u;
-                slaveFwState.packetsInCurrentBlock = 0u;
-                slaveFwState.writeAddress = FLASH_SLAVEOS_START_ADDR;
-                memset(slaveFwState.blockBuffer, 0xFF, sizeof(slaveFwState.blockBuffer));
+                memset(&masterFwState, 0, sizeof(masterFwState));
 
+                selectedState->imageKind = (selectedState == &masterFwState)
+                                         ? FW_IMAGE_KIND_MASTER
+                                         : FW_IMAGE_KIND_SLAVE;
+                selectedState->updateInProgress = true;
+                selectedState->imageSizeExact = imageSizeExact;
+                selectedState->totalBlocksExpected = totalBlocks;
+                selectedState->currentBlockNum = 0u;
+                selectedState->packetsInCurrentBlock = 0u;
+                selectedState->writeAddress = FW_GetStorageStartAddress(selectedState);
+                selectedState->imageSizeBytes = imageSizeBytes;
+                selectedState->bytesWritten = 0u;
+                memset(selectedState->blockBuffer, 0xFF, sizeof(selectedState->blockBuffer));
+
+                activeFwState = selectedState;
                 responseData[0] = 0xFFu;
             }
             else
             {
-                slaveFwState.updateInProgress = false;
-                if (eraseStatus != HAL_OK)
+                activeFwState = NULL;
+                if ((selectedState != NULL) &&
+                    ((eraseStatus != HAL_OK) || (metadataStatus != HAL_OK)))
                 {
                     CAN_ReportFlashWriteError();
                 }
@@ -1011,51 +1367,8 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
         }
 
         case CAN_MSG_FW_SLAVE_DATA:
-            FW_HandleDataPacket(&slaveFwState, srcNode, canData, dataLength);
-            return true;
-
-        case CAN_MSG_FW_MASTER_BEGIN:
-        {
-            uint16_t totalBlocks = 0u;
-            uint8_t responseData[1] = {0u};
-            HAL_StatusTypeDef eraseStatus;
-
-            if (dataLength >= 2u)
-            {
-                totalBlocks = (uint16_t)((canData[0] << 8) | canData[1]);
-            }
-
-            taskENTER_CRITICAL();
-            eraseStatus = FLASH_EraseSectors(FLASH_MYOS_START_SECTOR, FLASH_MYOS_END_SECTOR);
-            taskEXIT_CRITICAL();
-
-            if ((eraseStatus == HAL_OK) && (totalBlocks > 0u))
-            {
-                memset(&masterFwState, 0, sizeof(masterFwState));
-                masterFwState.updateInProgress = true;
-                masterFwState.totalBlocksExpected = totalBlocks;
-                masterFwState.currentBlockNum = 0u;
-                masterFwState.packetsInCurrentBlock = 0u;
-                masterFwState.writeAddress = FLASH_MYOS_START_ADDR;
-                memset(masterFwState.blockBuffer, 0xFF, sizeof(masterFwState.blockBuffer));
-
-                responseData[0] = 0xFFu;
-            }
-            else
-            {
-                masterFwState.updateInProgress = false;
-                if (eraseStatus != HAL_OK)
-                {
-                    CAN_ReportFlashWriteError();
-                }
-            }
-
-            FW_SendAck(srcNode, responseData, 1u);
-            return true;
-        }
-
         case CAN_MSG_FW_MASTER_DATA:
-            FW_HandleDataPacket(&masterFwState, srcNode, canData, dataLength);
+            FW_HandleDataPacket(activeFwState, srcNode, canData, dataLength);
             return true;
 
         case CAN_MSG_FW_SLAVE_UPDATE_START:
@@ -1068,7 +1381,7 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
                 slaveNum = canData[0];
             }
 
-            if (slaveNum < UART_CHANNEL_COUNT)
+            if ((SLAVE_FW_SEND_ENABLE != 0u) && (slaveNum < UART_CHANNEL_COUNT))
             {
                 slave.device[slaveNum].need_update = 1;
                 responseData[0] = slaveNum;
@@ -1150,28 +1463,43 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
     bool blockComplete = (state->packetsInCurrentBlock >= FW_BLOCK_SIZE_PACKETS);
 
     // Проверяем, это последний блок?
-    bool isLastBlock = (state->currentBlockNum >= (state->totalBlocksExpected - 1u));
 
     // Если блок собран полностью ИЛИ это последний блок и пришли все пакеты
     if (blockComplete)
     {
         // Вычисляем количество байт для записи
-        uint32_t bytesToWrite = state->packetsInCurrentBlock * FW_PACKET_DATA_SIZE;
+        uint32_t remainingBytes = 0u;
+        uint32_t bytesToWrite = 0u;
+        uint8_t ackData[2];
+        uint32_t calculatedCrc = 0u;
+        uint32_t storedCrc = 0u;
+        HAL_StatusTypeDef writeStatus;
+
+        if (state->bytesWritten >= state->imageSizeBytes)
+        {
+            state->updateInProgress = false;
+            activeFwState = NULL;
+            return;
+        }
+
+        remainingBytes = state->imageSizeBytes - state->bytesWritten;
+        bytesToWrite = (remainingBytes > FW_BLOCK_SIZE_BYTES) ? FW_BLOCK_SIZE_BYTES : remainingBytes;
 
         // Записываем блок во flash
-        HAL_StatusTypeDef writeStatus = FLASH_WriteBuffer(state->writeAddress, 
-                                                           state->blockBuffer, 
-                                                           bytesToWrite);
+        writeStatus = FLASH_WriteBuffer(state->writeAddress, 
+                                        state->blockBuffer, 
+                                        bytesToWrite);
 
         if (writeStatus != HAL_OK)
         {
             state->updateInProgress = false;
+            activeFwState = NULL;
             CAN_ReportFlashWriteError();
             return;
         }
 
         // Формируем подтверждение: номер записанного блока
-        uint8_t ackData[2];
+        state->bytesWritten += bytesToWrite;
         ackData[0] = (uint8_t)(state->currentBlockNum >> 8);
         ackData[1] = (uint8_t)(state->currentBlockNum & 0xFFu);
 
@@ -1189,29 +1517,37 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
         // Если записали все блоки - завершаем обновление
         if (state->currentBlockNum >= state->totalBlocksExpected)
         {
-          
-          
-           if (state == &masterFwState)
+            state->updateInProgress = false;
+            activeFwState = NULL;
+
+            if (state == &masterFwState)
             {
-                // Обновление MASTER OS завершено
-                crc32 = compute_flash_myos_crc();
-                iar_crc32 = *(const uint32_t *)(FLASH_MYOS_END_ADDR - 3);
-                
-                // Проверка CRC
-                if (crc32 == iar_crc32)
+                crc32 = 0u;
+                iar_crc32 = 0u;
+
+                if (FW_VerifyStoredImageCrc(state, &calculatedCrc, &storedCrc))
                 {
-                    Set_Update_Flag();  // Устанавливаем флаг 0x1111
+                    crc32 = calculatedCrc;
+                    iar_crc32 = storedCrc;
+                    if (Set_Update_Flag(state->imageSizeBytes) != HAL_OK)
+                    {
+                        CAN_ReportFlashWriteError();
+                    }
                 }
-          
+                else
+                {
+                    CAN_ReportFlashWriteError();
+                }
             }
-           else if(state == &slaveFwState)
-           {
-            slave.os_in_flash = 1;
-           }
-           
-            //state->updateInProgress = false;
-            //crc32 = compute_flash_myos_crc();
-            //iar_crc32 = *(const uint32_t *)(FLASH_MYOS_END_ADDR - 3);
+            else if (state == &slaveFwState)
+            {
+                if (FW_WriteStoredImageInfo(FW_IMAGE_KIND_SLAVE,
+                                            state->imageSizeBytes,
+                                            FLASH_UPDATE_FLAG_CLEAR_VALUE) != HAL_OK)
+                {
+                    CAN_ReportFlashWriteError();
+                }
+            }
         }
     }
 }
@@ -1232,7 +1568,7 @@ const uint16_t __attribute__((used)) lookup_table[256] = {
 
 
 
-uint32_t compute_flash_myos_crc(void) 
+uint32_t compute_flash_crc(uint32_t startAddress, uint32_t length) 
 {
 
     static uint32_t crc32_table[256] = {0};
@@ -1254,8 +1590,7 @@ uint32_t compute_flash_myos_crc(void)
     }
 
     uint32_t crc = 0xFFFFFFFFUL;
-    const uint8_t *data = (const uint8_t *)FLASH_MYOS_START_ADDR;
-    uint32_t length = FLASH_MYOS_SIZE - 4;
+    const uint8_t *data = (const uint8_t *)startAddress;
 
     while (length--) {
         crc = crc32_table[(crc >> 24) ^ *data++] ^ (crc << 8);
@@ -1269,35 +1604,18 @@ uint32_t compute_flash_myos_crc(void)
   * @brief  Устанавливает флаг обновления прошивки (0x1111)
   * @retval HAL_OK если успешно
   */
-HAL_StatusTypeDef Set_Update_Flag(void)
+HAL_StatusTypeDef Set_Update_Flag(uint32_t imageSizeBytes)
 {
-    HAL_StatusTypeDef status;
-    FLASH_EraseInitTypeDef EraseInitStruct;
-    uint32_t SectorError = 0;
-
-    HAL_FLASH_Unlock();
-
-    // 1. Стираем сектор с флагом (Sector 12), чтобы гарантировать чистоту перед записью
-    EraseInitStruct.TypeErase    = FLASH_TYPEERASE_SECTORS;
-    EraseInitStruct.VoltageRange = FLASH_VOLTAGE_RANGE_3;
-    EraseInitStruct.Sector       = FLASH_UPDATE_FLAG_SECTOR;
-    EraseInitStruct.NbSectors    = 1;
-
-    status = HAL_FLASHEx_Erase(&EraseInitStruct, &SectorError);
+    HAL_StatusTypeDef status = FW_WriteStoredImageInfo(FW_IMAGE_KIND_MASTER,
+                                                       imageSizeBytes,
+                                                       FLASH_UPDATE_FLAG_SET_VALUE);
     if (status != HAL_OK)
     {
-        HAL_FLASH_Lock();
         return status;
     }
 
-    // 2. Записываем флаг 0x1111
-    // Адрес должен быть выровнен, 0x08100000UL выровнен
-    status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_UPDATE_FLAG_ADDR, 0x00001111);
-
-    HAL_FLASH_Lock();
-    
     HAL_NVIC_SystemReset();
-    //return status;
+    return status;
 }
 
 /**

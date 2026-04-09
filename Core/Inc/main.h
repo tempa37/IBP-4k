@@ -86,29 +86,36 @@ extern "C" {
 #define FLASH_UNUSED_SIZE         (FLASH_UNUSED_END_ADDR - FLASH_UNUSED_START_ADDR + 1)
 
 // ============================================================================
-// 4. myOS REGION (512 KB)
-// Sectors: 17, 18, 19, 20 (128K each)
+// 4. SHARED FIRMWARE STAGING REGION (128 KB)
+// One common slot for either IBP-4k firmware or slave firmware.
+// Sector: 17 (128 KB)
 // ============================================================================
-#define FLASH_MYOS_START_ADDR     0x08120000UL
-#define FLASH_MYOS_END_ADDR       0x0813FFFFUL
-#define FLASH_MYOS_SIZE           (FLASH_MYOS_END_ADDR - FLASH_MYOS_START_ADDR + 1)
-#define FLASH_MYOS_START_SECTOR   FLASH_SECTOR_17
-#define FLASH_MYOS_END_SECTOR     FLASH_SECTOR_17
-#define FLASH_MYOS_SECTOR_COUNT   4
+#define FLASH_FW_STORAGE_START_ADDR      0x08120000UL
+#define FLASH_FW_STORAGE_END_ADDR        0x0813FFFFUL
+#define FLASH_FW_STORAGE_SIZE            (FLASH_FW_STORAGE_END_ADDR - FLASH_FW_STORAGE_START_ADDR + 1)
+#define FLASH_FW_STORAGE_START_SECTOR    FLASH_SECTOR_17
+#define FLASH_FW_STORAGE_END_SECTOR      FLASH_SECTOR_17
+#define FLASH_FW_STORAGE_SECTOR_COUNT    1
 
 // ============================================================================
-// 5. slaveOS REGION (128 KB)
-// Sectors: 21(128K each)
+// 5. RESERVED GAP
+// Old slave staging slot is no longer used after moving to a shared slot.
 // ============================================================================
-#define FLASH_SLAVEOS_START_ADDR  0x081A0000UL
-#define FLASH_SLAVEOS_END_ADDR    0x081BFFFFUL
-#define FLASH_SLAVEOS_SIZE        (FLASH_SLAVEOS_END_ADDR - FLASH_SLAVEOS_START_ADDR + 1)
-#define FLASH_SLAVEOS_START_SECTOR FLASH_SECTOR_21
-#define FLASH_SLAVEOS_END_SECTOR   FLASH_SECTOR_21
-#define FLASH_SLAVEOS_SECTOR_COUNT 1
+#define FLASH_RESERVED_START_ADDR        0x081A0000UL
+#define FLASH_RESERVED_END_ADDR          0x081BFFFFUL
+#define FLASH_RESERVED_SIZE              (FLASH_RESERVED_END_ADDR - FLASH_RESERVED_START_ADDR + 1)
 
-#define FLASH_UPDATE_FLAG_ADDR 0x08100000UL
-#define FLASH_UPDATE_FLAG_SECTOR FLASH_SECTOR_12
+#define FLASH_UPDATE_FLAG_ADDR           0x08100000UL
+#define FLASH_STORED_IMAGE_TYPE_ADDR     (FLASH_UPDATE_FLAG_ADDR + 0x4u)
+#define FLASH_STORED_IMAGE_SIZE_ADDR     (FLASH_UPDATE_FLAG_ADDR + 0x8u)
+#define FLASH_UPDATE_FLAG_SECTOR         FLASH_SECTOR_12
+
+#define FLASH_UPDATE_FLAG_SET_VALUE      0x00001111UL
+#define FLASH_UPDATE_FLAG_CLEAR_VALUE    0xFFFFFFFFUL
+
+#define FLASH_STORED_IMAGE_TYPE_NONE_VALUE    0xFFFFFFFFUL
+#define FLASH_STORED_IMAGE_TYPE_MASTER_VALUE  0x4D415354UL
+#define FLASH_STORED_IMAGE_TYPE_SLAVE_VALUE   0x534C4156UL
   
   
   

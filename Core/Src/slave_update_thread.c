@@ -95,21 +95,28 @@ void Slave_NextDataBlock(SlaveUpdateContext_t *ctx)
 void Slave_UpdateProcess(void)
 {
     uint32_t current_tick = HAL_GetTick();
+
+    if (SLAVE_FW_SEND_ENABLE == 0u)
+    {
+        return;
+    }
     
     for (uint8_t slave_num = 0; slave_num < UART_CHANNEL_COUNT; slave_num++)
     {
         SlaveUpdateContext_t *ctx = &slave_update_ctx[slave_num];
         
         // Проверяем, нужно ли начинать обновление
-        if (slave.device[slave_num].need_update && slave.os_in_flash)
+        if (slave.device[slave_num].need_update && slave.os_in_flash && (slave.os_size_bytes > 0u))
         {
             if (ctx->phase == SLAVE_UPD_IDLE)
             {
                 // Инициализируем обновление
                 memset(ctx, 0, sizeof(SlaveUpdateContext_t));
                 ctx->slave_number = slave_num;
-                ctx->current_address = FLASH_SLAVEOS_START_ADDR;
-                ctx->total_bytes = SLAVE_OS_SIZE;
+                ctx->current_address = FLASH_FW_STORAGE_START_ADDR;
+                ctx->total_bytes = (slave.os_size_bytes > 0u)
+                                 ? slave.os_size_bytes
+                                 : 0u;
                 ctx->phase = SLAVE_UPD_SEND_ENTER_BOOTLOADER;
                 ctx->last_command_tick = current_tick;
             }

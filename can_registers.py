@@ -22,6 +22,7 @@ except ImportError:
 FW_BLOCK_SIZE_PACKETS = 10
 FW_PACKET_DATA_SIZE = 6
 FW_BLOCK_SIZE_BYTES = FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE
+IBP4K_MASTER_FW_SIZE = 64 * 1024
 
 CAN_PROTOCOL_ADDR_KOU = 1
 CAN_PROTOCOL_ADDR_IBP4K = 20
@@ -412,7 +413,15 @@ class FirmwareUploader:
             print(f"Failed to read firmware: {exc}")
             return False
 
-        self.is_master = is_master
+        detected_is_master = len(self.firmware) == IBP4K_MASTER_FW_SIZE
+        if is_master != detected_is_master:
+            mode = "master" if detected_is_master else "slave"
+            print(
+                f"Firmware size decides the target. "
+                f"Ignoring {'--master' if is_master else 'implicit slave mode'}, using {mode}."
+            )
+
+        self.is_master = detected_is_master
         self.total_blocks = (len(self.firmware) + FW_BLOCK_SIZE_BYTES - 1) // FW_BLOCK_SIZE_BYTES
         target = "master" if self.is_master else "slave"
         print(f"Firmware: {path}")
@@ -428,9 +437,12 @@ class FirmwareUploader:
             else CAN_PROTOCOL_MSG_FW_SLAVE_BEGIN
         )
         ack_id = self._ack_id()
-        request = struct.pack(">H", self.total_blocks)
+        request = struct.pack(">HI", self.total_blocks, len(self.firmware))
 
-        print(f"Init update: send 0x{init_id:08X}, total_blocks={self.total_blocks}")
+        print(
+            f"Init update: send 0x{init_id:08X}, "
+            f"total_blocks={self.total_blocks}, size={len(self.firmware)}"
+        )
         self.client.drain_rx()
         if not self.client.send_frame(init_id, request, is_extended_id=True):
             return False
@@ -721,7 +733,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upload firmware over CAN using the existing STM32 boot/update protocol.",
     )
     upload_parser.add_argument("firmware", type=Path, help="Path to firmware image.")
-    upload_parser.add_argument("--master", action="store_true", help="Upload master firmware.")
+    upload_parser.add_argument(
+        "--master",
+        action="store_true",
+        help="Deprecated. Target is auto-detected from firmware size.",
+    )
     upload_parser.add_argument("--bitrate", type=int, default=125000, help="CAN bitrate in bps.")
     upload_parser.add_argument("--quiet", action="store_true", help="Minimal upload output.")
     upload_parser.add_argument(
