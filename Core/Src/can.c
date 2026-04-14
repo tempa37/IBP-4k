@@ -98,6 +98,7 @@ static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
 }
 
 static void CAN_RecordErrorCode(uint8_t errorCodeValue);
+static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData);
 
 static void CAN_RecordStartupResetFlags(void)
 {
@@ -126,6 +127,36 @@ static void CAN_RecordErrorCode(uint8_t errorCodeValue)
 {
     lastErrorCode = errorCodeValue;
     lastErrorTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
+}
+
+static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData)
+{
+    uint8_t head;
+    uint8_t nextHead;
+
+    if ((header == NULL) || (frameData == NULL))
+    {
+        return;
+    }
+
+    head = canContext.rxHead;
+    nextHead = (uint8_t)((head + 1u) % CAN_RX_QUEUE_SIZE);
+
+    if (nextHead == canContext.rxTail)
+    {
+        canContext.errorCode = 0x80000001u;
+        canContext.errorDetected = true;
+        canContext.dataReady = false;
+        canContext.rxHead = 0u;
+        canContext.rxTail = 0u;
+        memset(canContext.rxQueue, 0, sizeof(canContext.rxQueue));
+        return;
+    }
+
+    canContext.rxQueue[head].header = *header;
+    memcpy(canContext.rxQueue[head].data, frameData, sizeof(canContext.rxQueue[head].data));
+    canContext.rxHead = nextHead;
+    canContext.dataReady = true;
 }
 
 static bool CAN_IsSupportedMsgId(uint16_t msgId)
@@ -543,9 +574,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
     {
         UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-        canContext.header = header;
-        memcpy(canContext.data, frameData, sizeof(frameData));
-        canContext.dataReady = true;
+        CAN_QueueRxFrameFromIsr(&header, frameData);
         taskEXIT_CRITICAL_FROM_ISR(irqState);
     }
 }
@@ -567,9 +596,7 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
     {
         UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
-        canContext.header = header;
-        memcpy(canContext.data, frameData, sizeof(frameData));
-        canContext.dataReady = true;
+        CAN_QueueRxFrameFromIsr(&header, frameData);
         taskEXIT_CRITICAL_FROM_ISR(irqState);
     }
 }
@@ -596,10 +623,39 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
         canContext.errorCode = hcan->ErrorCode;
         canContext.errorDetected = true;
         canContext.dataReady = false;
-        memset(&canContext.header, 0, sizeof(canContext.header));
-        memset(canContext.data, 0, sizeof(canContext.data));
+        canContext.rxHead = 0u;
+        canContext.rxTail = 0u;
+        memset(canContext.rxQueue, 0, sizeof(canContext.rxQueue));
         taskEXIT_CRITICAL_FROM_ISR(irqState);
     }
+}
+
+bool CAN_DequeueReceivedFrame(CAN_RxHeaderTypeDef *header, uint8_t *data, uint8_t *dlc)
+{
+    bool hasFrame = false;
+
+    if ((header == NULL) || (data == NULL) || (dlc == NULL))
+    {
+        return false;
+    }
+
+    taskENTER_CRITICAL();
+
+    if (canContext.rxHead != canContext.rxTail)
+    {
+        const CanRxFrame_t *frame = &canContext.rxQueue[canContext.rxTail];
+
+        *header = frame->header;
+        memcpy(data, frame->data, sizeof(frame->data));
+        canContext.rxTail = (uint8_t)((canContext.rxTail + 1u) % CAN_RX_QUEUE_SIZE);
+        canContext.dataReady = (canContext.rxHead != canContext.rxTail);
+        *dlc = (header->DLC <= 8u) ? header->DLC : 8u;
+        hasFrame = true;
+    }
+
+    taskEXIT_CRITICAL();
+
+    return hasFrame;
 }
 
 void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,

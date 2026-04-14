@@ -603,6 +603,8 @@
 		"-D",
 		"__MULTIPLE_INHERITANCE__=1",
 		"-D",
+		"__FOR_DEBUG__=",
+		"-D",
 		"__AAPCS_VFP__=1",
 		"-D",
 		"__ARM4TM__=4",

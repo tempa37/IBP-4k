@@ -650,6 +650,7 @@ void StartDefaultTask(void const * argument)
   /* USER CODE BEGIN 5 */
     /* Локальные структуры для приёма CAN-кадров */
     CAN_RxHeaderTypeDef localHeader = {0};
+    uint8_t dataLength = 0u;
     HAL_GPIO_WritePin(GPIOG,
                   EN_1_Pin | EN_2_Pin | EN_3_Pin | EN_4_Pin,
                   GPIO_PIN_SET);
@@ -670,21 +671,13 @@ void StartDefaultTask(void const * argument)
       canContext.errorCode = 0u;
       taskEXIT_CRITICAL();
     }
-    else if (canContext.dataReady)
-    {
-      uint8_t dataLength = 0u;
-      taskENTER_CRITICAL();
-      localHeader = canContext.header;
-      memcpy(CanlocalData, canContext.data, sizeof(CanlocalData));
-      uint8_t fillStart = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
-      if (fillStart < sizeof(CanlocalData))
-      {
-        memset(&CanlocalData[fillStart], 0, sizeof(CanlocalData) - fillStart);
-      }
-      canContext.dataReady = false;
-      taskEXIT_CRITICAL();
 
-      dataLength = (localHeader.DLC <= 8u) ? localHeader.DLC : 8u;
+    while (CAN_DequeueReceivedFrame(&localHeader, CanlocalData, &dataLength))
+    {
+      if (dataLength < sizeof(CanlocalData))
+      {
+        memset(&CanlocalData[dataLength], 0, sizeof(CanlocalData) - dataLength);
+      }
       lastProcessedCanId = (localHeader.IDE == CAN_ID_EXT) ? localHeader.ExtId : 0u;
       lastProcessedCanDlc = dataLength;
 
@@ -696,12 +689,9 @@ void StartDefaultTask(void const * argument)
         }
       }
     }
-    
-    osDelay(10); 
-
 #endif
     
-    osDelay(10);
+    osDelay(1);
   }
   /* USER CODE END 5 */
 }
@@ -799,7 +789,8 @@ void StartTask02(void const * argument)
       }
       
       /* Периодическая генерация Modbus-запросов к каждому из UART-устройств */
-      if ((currentTick - modbusLastPollTick[index]) >= modbusPollIntervalMs)
+      if (!Slave_IsUpdateActive((uint8_t)index) &&
+          ((currentTick - modbusLastPollTick[index]) >= modbusPollIntervalMs))
       {
         if ((context->mutex != NULL) && (osMutexWait(context->mutex, osWaitForever) == osOK))
         {
@@ -1480,6 +1471,12 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
             HAL_StatusTypeDef metadataStatus = HAL_ERROR;
             FirmwareUpdateState_t *selectedState = NULL;
 
+            if (Slave_IsAnyUpdateRunning())
+            {
+                FW_SendAck(srcNode, responseData, 1u);
+                return true;
+            }
+
             if (!FW_ParseBeginRequest(canData,
                                       dataLength,
                                       &totalBlocks,
@@ -1524,6 +1521,7 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
                 selectedState->bytesWritten = 0u;
                 memset(selectedState->blockBuffer, 0xFF, sizeof(selectedState->blockBuffer));
 
+                Slave_CancelPendingUpdates();
                 activeFwState = selectedState;
                 responseData[0] = 0xFFu;
             }
@@ -1555,23 +1553,22 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
         {
             uint8_t slaveNum = 0xFFu;
             uint8_t responseData[2];
+            bool requestAccepted = false;
 
             if (dataLength >= 1u)
             {
                 slaveNum = canData[0];
             }
 
-            if ((SLAVE_FW_SEND_ENABLE != 0u) && (slaveNum < UART_CHANNEL_COUNT))
+            if (SLAVE_FW_SEND_ENABLE != 0u)
             {
-                slave.device[slaveNum].need_update = 1;
-                responseData[0] = slaveNum;
-                responseData[1] = 0xFFu;
+                requestAccepted = (slaveNum < UART_CHANNEL_COUNT)
+                                ? Slave_RequestSingleUpdate(slaveNum)
+                                : Slave_RequestConnectedUpdate();
             }
-            else
-            {
-                responseData[0] = slaveNum;
-                responseData[1] = 0x00u;
-            }
+
+            responseData[0] = slaveNum;
+            responseData[1] = requestAccepted ? 0xFFu : 0x00u;
 
             FW_SendAck(srcNode, responseData, 2u);
             return true;
@@ -1751,6 +1748,12 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                 {
                     CAN_ReportFlashWriteError();
                 }
+#if (SLAVE_AUTO_UPDATE_ENABLE != 0u)
+                else
+                {
+                    (void)Slave_RequestAutoConnectedUpdate();
+                }
+#endif
             }
         }
     }

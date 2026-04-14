@@ -6,11 +6,20 @@
 #include "stdbool.h"
 #include "string.h"
 
+#define CAN_RX_QUEUE_SIZE  32u
+
+typedef struct
+{
+    CAN_RxHeaderTypeDef header;
+    uint8_t data[8];
+} CanRxFrame_t;
+
 typedef struct
 {
     osMutexId mutex;
-    CAN_RxHeaderTypeDef header;
-    uint8_t data[8];
+    CanRxFrame_t rxQueue[CAN_RX_QUEUE_SIZE];
+    volatile uint8_t rxHead;
+    volatile uint8_t rxTail;
     volatile bool dataReady;
     volatile bool errorDetected;
     volatile uint32_t errorCode;
@@ -94,6 +103,7 @@ void MX_CAN1_Init(void);
 uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priority);
 bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId, uint8_t *priority);
 bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan, uint32_t extId);
+bool CAN_DequeueReceivedFrame(CAN_RxHeaderTypeDef *header, uint8_t *data, uint8_t *dlc);
 void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
                            uint32_t extId,
                            const uint8_t *data,
