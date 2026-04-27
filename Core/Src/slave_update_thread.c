@@ -12,6 +12,8 @@
 #define SLAVE_BOOT_RESP_NONE        0u
 #define SLAVE_BOOT_RESP_OK          1u
 #define SLAVE_BOOT_RESP_INVALID     2u
+#define SLAVE_EXT_ERASE_PAGES_PER_CMD    16u
+#define SLAVE_EXT_ERASE_PAYLOAD_MAX_SIZE (2u + (2u * SLAVE_EXT_ERASE_PAGES_PER_CMD) + 1u)
 
 extern ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT];
 
@@ -54,12 +56,15 @@ typedef struct
     uint8_t retry_count;
     uint32_t last_command_tick;
     uint8_t boot_resp_received;
+    uint16_t erase_next_page;
+    uint16_t erase_last_page;
+    uint16_t erase_pages_in_block;
     uint16_t payload_size;
     uint16_t padded_size;
     uint8_t write_buffer[SLAVE_FW_BLOCK_SIZE];
 } SlaveUpdateContext_t;
 
-static SlaveUpdateContext_t slave_update_ctx[UART_CHANNEL_COUNT] = {0};
+static SlaveUpdateContext_t slave_update_ctx[UART_CHANNEL_COUNT];
 static volatile uint8_t slave_update_pending_mask = 0u;
 static volatile uint8_t slave_update_success_mask = 0u;
 static volatile uint8_t slave_update_error_mask = 0u;
@@ -185,7 +190,163 @@ static bool Slave_HasStoredImageReady(void)
     return (slave.os_in_flash != 0u) &&
            (slave.os_size_bytes > 0u) &&
            (slave.os_size_bytes <= FLASH_FW_STORAGE_SIZE) &&
-           (slave.os_size_bytes <= FLASH_APP_SIZE);
+           (slave.os_size_bytes <= SLAVE_FLASH_TARGET_SIZE_BYTES);
+}
+
+static void Slave_CopyDebugText(volatile char *destination,
+                                const char *source,
+                                uint16_t destination_size)
+{
+    uint16_t index = 0u;
+
+    if ((destination == NULL) || (destination_size == 0u))
+    {
+        return;
+    }
+
+    if (source == NULL)
+    {
+        source = "NULL";
+    }
+
+    while ((index + 1u) < destination_size)
+    {
+        char value = source[index];
+
+        destination[index] = value;
+        if (value == '\0')
+        {
+            return;
+        }
+
+        index++;
+    }
+
+    destination[index] = '\0';
+}
+
+static const char *Slave_GetPhaseText(SlaveUpdatePhase_t phase)
+{
+    switch (phase)
+    {
+        case SLAVE_UPD_IDLE: return "IDLE";
+        case SLAVE_UPD_SEND_ENTER_BOOTLOADER: return "SEND_ENTER_BOOT";
+        case SLAVE_UPD_WAIT_BOOTLOADER_ENTRY: return "WAIT_BOOT_ENTRY";
+        case SLAVE_UPD_SEND_SYNC: return "SEND_SYNC";
+        case SLAVE_UPD_WAIT_ACK_SYNC: return "WAIT_ACK_SYNC";
+        case SLAVE_UPD_SEND_EXT_ERASE_CMD: return "SEND_EXT_ERASE_CMD";
+        case SLAVE_UPD_WAIT_ACK_EXT_ERASE_CMD: return "WAIT_ACK_ERASE_CMD";
+        case SLAVE_UPD_SEND_EXT_ERASE_PAYLOAD: return "SEND_ERASE_PAYLOAD";
+        case SLAVE_UPD_WAIT_ACK_EXT_ERASE_PAYLOAD: return "WAIT_ACK_ERASE_PAYLOAD";
+        case SLAVE_UPD_PREPARE_BLOCK: return "PREPARE_BLOCK";
+        case SLAVE_UPD_SEND_WRITE_CMD: return "SEND_WRITE_CMD";
+        case SLAVE_UPD_WAIT_ACK_WRITE_CMD: return "WAIT_ACK_WRITE_CMD";
+        case SLAVE_UPD_SEND_ADDRESS: return "SEND_ADDRESS";
+        case SLAVE_UPD_WAIT_ACK_ADDRESS: return "WAIT_ACK_ADDRESS";
+        case SLAVE_UPD_SEND_DATA: return "SEND_DATA";
+        case SLAVE_UPD_WAIT_ACK_DATA: return "WAIT_ACK_DATA";
+        case SLAVE_UPD_NEXT_BLOCK: return "NEXT_BLOCK";
+        case SLAVE_UPD_SEND_GO_CMD: return "SEND_GO_CMD";
+        case SLAVE_UPD_WAIT_ACK_GO_CMD: return "WAIT_ACK_GO_CMD";
+        case SLAVE_UPD_SEND_GO_ADDRESS: return "SEND_GO_ADDRESS";
+        case SLAVE_UPD_WAIT_ACK_GO_ADDRESS: return "WAIT_ACK_GO_ADDRESS";
+        case SLAVE_UPD_DONE: return "DONE";
+        case SLAVE_UPD_ERROR: return "ERROR";
+        default: return "UNKNOWN_PHASE";
+    }
+}
+
+static const char *Slave_GetReasonText(uint8_t reason)
+{
+    switch (reason)
+    {
+        case SLAVE_UPDATE_DEBUG_REASON_NONE: return "NONE";
+        case SLAVE_UPDATE_DEBUG_REASON_DISABLED: return "DISABLED";
+        case SLAVE_UPDATE_DEBUG_REASON_REQUEST_NO_IMAGE: return "REQUEST_NO_IMAGE";
+        case SLAVE_UPDATE_DEBUG_REASON_REQUEST_NO_TARGETS: return "REQUEST_NO_TARGETS";
+        case SLAVE_UPDATE_DEBUG_REASON_REQUEST_BUSY: return "REQUEST_BUSY";
+        case SLAVE_UPDATE_DEBUG_REASON_START_NO_IMAGE: return "START_NO_IMAGE";
+        case SLAVE_UPDATE_DEBUG_REASON_START_DISCONNECTED: return "START_DISCONNECTED";
+        case SLAVE_UPDATE_DEBUG_REASON_INVALID_SIZE: return "INVALID_SIZE";
+        case SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED: return "UART_TX_FAILED";
+        case SLAVE_UPDATE_DEBUG_REASON_TIMEOUT: return "TIMEOUT";
+        case SLAVE_UPDATE_DEBUG_REASON_NACK: return "NACK";
+        case SLAVE_UPDATE_DEBUG_REASON_RETRY_LIMIT: return "RETRY_LIMIT";
+        case SLAVE_UPDATE_DEBUG_REASON_CANCELLED: return "CANCELLED";
+        case SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_TIMEOUT: return "BOOT_RESP_TIMEOUT";
+        case SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_INVALID: return "BOOT_RESP_INVALID";
+        default: return "UNKNOWN_REASON";
+    }
+}
+
+static void Slave_ClearFailureSnapshot(void)
+{
+    g_slave_update_debug.fail_valid = 0u;
+    g_slave_update_debug.fail_slave_num = SLAVE_UPDATE_INVALID_INDEX;
+    g_slave_update_debug.fail_phase = (uint8_t)SLAVE_UPD_IDLE;
+    g_slave_update_debug.fail_event = SLAVE_UPDATE_DEBUG_EVENT_NONE;
+    g_slave_update_debug.fail_terminal_reason = SLAVE_UPDATE_DEBUG_REASON_NONE;
+    g_slave_update_debug.fail_detail_reason = SLAVE_UPDATE_DEBUG_REASON_NONE;
+    g_slave_update_debug.fail_response = 0u;
+    g_slave_update_debug.fail_retry_count = 0u;
+    g_slave_update_debug.fail_ack = 0u;
+    g_slave_update_debug.fail_tick = 0u;
+    g_slave_update_debug.fail_last_command_tick = 0u;
+    g_slave_update_debug.fail_bytes_written = 0u;
+    g_slave_update_debug.fail_total_bytes = 0u;
+    g_slave_update_debug.fail_target_address = 0u;
+    g_slave_update_debug.fail_payload_size = 0u;
+    g_slave_update_debug.fail_padded_size = 0u;
+    g_slave_update_debug.fail_erase_next_page = 0u;
+    g_slave_update_debug.fail_erase_last_page = 0u;
+    g_slave_update_debug.fail_erase_pages_in_block = 0u;
+    Slave_CopyDebugText(g_slave_update_debug.fail_phase_text, "NONE", SLAVE_UPDATE_DEBUG_TEXT_SIZE);
+    Slave_CopyDebugText(g_slave_update_debug.fail_reason_text, "NONE", SLAVE_UPDATE_DEBUG_TEXT_SIZE);
+    Slave_CopyDebugText(g_slave_update_debug.fail_detail_text, "NONE", SLAVE_UPDATE_DEBUG_TEXT_SIZE);
+}
+
+static void Slave_SaveFailureSnapshot(uint8_t slave_num,
+                                      SlaveUpdatePhase_t failed_phase,
+                                      uint8_t terminal_reason,
+                                      uint8_t detail_reason,
+                                      uint8_t response,
+                                      const SlaveUpdateContext_t *ctx,
+                                      uint32_t current_tick)
+{
+    /*
+     * Этот снимок не живой, а посмертный: он остается после завершения процесса,
+     * когда ctx уже очищен и live_phase снова IDLE. Так в отладчике сразу видно,
+     * где именно все упало, без угадывания по кольцевому trace.
+     */
+    g_slave_update_debug.fail_valid = 1u;
+    g_slave_update_debug.fail_slave_num = slave_num;
+    g_slave_update_debug.fail_phase = (uint8_t)failed_phase;
+    g_slave_update_debug.fail_event = SLAVE_UPDATE_DEBUG_EVENT_ERROR;
+    g_slave_update_debug.fail_terminal_reason = terminal_reason;
+    g_slave_update_debug.fail_detail_reason = detail_reason;
+    g_slave_update_debug.fail_response = response;
+    g_slave_update_debug.fail_retry_count = (ctx != NULL) ? ctx->retry_count : 0u;
+    g_slave_update_debug.fail_ack = (slave_num < UART_CHANNEL_COUNT) ? slave.device[slave_num].ack : 0u;
+    g_slave_update_debug.fail_tick = current_tick;
+    g_slave_update_debug.fail_last_command_tick = (ctx != NULL) ? ctx->last_command_tick : 0u;
+    g_slave_update_debug.fail_bytes_written = (ctx != NULL) ? ctx->bytes_written : 0u;
+    g_slave_update_debug.fail_total_bytes = (ctx != NULL) ? ctx->total_bytes : 0u;
+    g_slave_update_debug.fail_target_address = (ctx != NULL) ? ctx->target_address : 0u;
+    g_slave_update_debug.fail_payload_size = (ctx != NULL) ? ctx->payload_size : 0u;
+    g_slave_update_debug.fail_padded_size = (ctx != NULL) ? ctx->padded_size : 0u;
+    g_slave_update_debug.fail_erase_next_page = (ctx != NULL) ? ctx->erase_next_page : 0u;
+    g_slave_update_debug.fail_erase_last_page = (ctx != NULL) ? ctx->erase_last_page : 0u;
+    g_slave_update_debug.fail_erase_pages_in_block = (ctx != NULL) ? ctx->erase_pages_in_block : 0u;
+
+    Slave_CopyDebugText(g_slave_update_debug.fail_phase_text,
+                        Slave_GetPhaseText(failed_phase),
+                        SLAVE_UPDATE_DEBUG_TEXT_SIZE);
+    Slave_CopyDebugText(g_slave_update_debug.fail_reason_text,
+                        Slave_GetReasonText(terminal_reason),
+                        SLAVE_UPDATE_DEBUG_TEXT_SIZE);
+    Slave_CopyDebugText(g_slave_update_debug.fail_detail_text,
+                        Slave_GetReasonText(detail_reason),
+                        SLAVE_UPDATE_DEBUG_TEXT_SIZE);
 }
 
 static void Slave_ResetBatchState(void)
@@ -194,6 +355,7 @@ static void Slave_ResetBatchState(void)
     slave_update_success_mask = 0u;
     slave_update_error_mask = 0u;
     slave_update_active_slave = SLAVE_UPDATE_INVALID_INDEX;
+    Slave_ClearFailureSnapshot();
 }
 
 static void Slave_UpdateDebugSnapshot(uint32_t current_tick)
@@ -497,7 +659,12 @@ static SlaveUpdatePhase_t Slave_GetRetryPhase(SlaveUpdatePhase_t phase)
             return SLAVE_UPD_SEND_EXT_ERASE_CMD;
 
         case SLAVE_UPD_WAIT_ACK_EXT_ERASE_PAYLOAD:
-            return SLAVE_UPD_SEND_EXT_ERASE_PAYLOAD;
+            /*
+             * После NACK загрузчик возвращается к ожиданию новой команды.
+             * Поэтому повторяем весь Extended Erase для того же блока страниц,
+             * а не шлем payload отдельно в никуда.
+             */
+            return SLAVE_UPD_SEND_EXT_ERASE_CMD;
 
         case SLAVE_UPD_WAIT_ACK_WRITE_CMD:
             return SLAVE_UPD_SEND_WRITE_CMD;
@@ -545,12 +712,22 @@ static void Slave_ScheduleRetryOrError(SlaveUpdateContext_t *ctx,
     }
     else
     {
+        SlaveUpdatePhase_t failed_phase = ctx->phase;
+        uint8_t response = slave.device[ctx->slave_number].ack;
+
+        Slave_SaveFailureSnapshot(ctx->slave_number,
+                                  failed_phase,
+                                  SLAVE_UPDATE_DEBUG_REASON_RETRY_LIMIT,
+                                  reason,
+                                  response,
+                                  ctx,
+                                  current_tick);
         ctx->phase = SLAVE_UPD_ERROR;
         Slave_RecordDebugEvent(ctx->slave_number,
                                SLAVE_UPDATE_DEBUG_EVENT_ERROR,
-                               ctx->phase,
+                               failed_phase,
                                SLAVE_UPDATE_DEBUG_REASON_RETRY_LIMIT,
-                               0u,
+                               response,
                                ctx,
                                current_tick);
     }
@@ -581,6 +758,71 @@ static bool Slave_PrepareNextDataBlock(SlaveUpdateContext_t *ctx)
     memcpy(ctx->write_buffer, source_ptr, ctx->payload_size);
 
     ctx->phase = SLAVE_UPD_SEND_WRITE_CMD;
+    return true;
+}
+
+static bool Slave_PrepareExtErasePayload(SlaveUpdateContext_t *ctx,
+                                         uint8_t *payload,
+                                         uint16_t payload_capacity,
+                                         uint16_t *payload_length)
+{
+    uint16_t pages_remaining;
+    uint16_t pages_in_block;
+    uint16_t required_length;
+    uint16_t page_count_minus_one;
+    uint8_t checksum = 0u;
+
+    if ((ctx == NULL) || (payload == NULL) || (payload_length == NULL))
+    {
+        return false;
+    }
+
+    if ((SLAVE_EXT_ERASE_PAGES_PER_CMD == 0u) ||
+        (ctx->erase_next_page > ctx->erase_last_page))
+    {
+        return false;
+    }
+
+    /*
+     * AN3155 Extended Erase:
+     * - первые 2 байта: N = количество страниц/секторов минус 1, MSB first;
+     * - дальше по 2 байта на каждый номер страницы/сектора, тоже MSB first;
+     * - последний байт: XOR всех предыдущих байтов payload.
+     *
+     * Для STM32L051C6 это реальные flash-страницы по 128 байт: 0..255.
+     * Стираем весь flash слейва постранично, потому что mass erase через 0xFFFF
+     * этот загрузчик не принимает.
+     */
+    pages_remaining = (uint16_t)(ctx->erase_last_page - ctx->erase_next_page + 1u);
+    pages_in_block = (pages_remaining > SLAVE_EXT_ERASE_PAGES_PER_CMD)
+                   ? SLAVE_EXT_ERASE_PAGES_PER_CMD
+                   : pages_remaining;
+    required_length = (uint16_t)(2u + (2u * pages_in_block) + 1u);
+
+    if (payload_capacity < required_length)
+    {
+        return false;
+    }
+
+    page_count_minus_one = (uint16_t)(pages_in_block - 1u);
+    payload[0] = (uint8_t)((page_count_minus_one >> 8) & 0xFFu);
+    payload[1] = (uint8_t)(page_count_minus_one & 0xFFu);
+    checksum = (uint8_t)(payload[0] ^ payload[1]);
+
+    for (uint16_t index = 0u; index < pages_in_block; ++index)
+    {
+        uint16_t page = (uint16_t)(ctx->erase_next_page + index);
+        uint16_t offset = (uint16_t)(2u + (2u * index));
+
+        payload[offset] = (uint8_t)((page >> 8) & 0xFFu);
+        payload[offset + 1u] = (uint8_t)(page & 0xFFu);
+        checksum ^= payload[offset];
+        checksum ^= payload[offset + 1u];
+    }
+
+    payload[required_length - 1u] = checksum;
+    ctx->erase_pages_in_block = pages_in_block;
+    *payload_length = required_length;
     return true;
 }
 
@@ -731,7 +973,8 @@ void Slave_UpdateProcess(void)
 
             if ((ctx->total_bytes == 0u) ||
                 (ctx->total_bytes > FLASH_FW_STORAGE_SIZE) ||
-                (ctx->total_bytes > FLASH_APP_SIZE))
+                (ctx->total_bytes > SLAVE_FLASH_TARGET_SIZE_BYTES) ||
+                (SLAVE_FLASH_ERASE_FIRST_PAGE > SLAVE_FLASH_ERASE_LAST_PAGE))
             {
                 ctx->phase = SLAVE_UPD_ERROR;
                 Slave_RecordDebugEvent(slave_num,
@@ -746,6 +989,9 @@ void Slave_UpdateProcess(void)
             {
                 ctx->app_start_address = SLAVE_FLASH_TARGET_START_ADDR;
                 ctx->target_address = ctx->app_start_address;
+                ctx->erase_next_page = SLAVE_FLASH_ERASE_FIRST_PAGE;
+                ctx->erase_last_page = SLAVE_FLASH_ERASE_LAST_PAGE;
+                ctx->erase_pages_in_block = 0u;
                 ctx->phase = SLAVE_UPD_SEND_ENTER_BOOTLOADER;
                 Slave_RecordPhaseTrace(ctx, current_tick);
             }
@@ -989,9 +1235,31 @@ void Slave_UpdateProcess(void)
 
             case SLAVE_UPD_SEND_EXT_ERASE_PAYLOAD:
             {
-                const uint8_t mass_erase_payload[3] = {0xFFu, 0xFFu, 0x00u};
+                uint8_t erase_payload[SLAVE_EXT_ERASE_PAYLOAD_MAX_SIZE];
+                uint16_t erase_payload_length = 0u;
 
-                if (Slave_SendBootloaderCommand(slave_num, mass_erase_payload, sizeof(mass_erase_payload)))
+                /*
+                 * Стираем весь программный flash STM32L051C6: страницы 0..255.
+                 * В одну команду кладем не весь список, а блок страниц, чтобы
+                 * не строить огромный пакет и проще понимать, где все упало.
+                 */
+                if (!Slave_PrepareExtErasePayload(ctx,
+                                                  erase_payload,
+                                                  sizeof(erase_payload),
+                                                  &erase_payload_length))
+                {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ERROR,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_INVALID_SIZE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
+                    ctx->phase = SLAVE_UPD_ERROR;
+                    break;
+                }
+
+                if (Slave_SendBootloaderCommand(slave_num, erase_payload, erase_payload_length))
                 {
                     Slave_RecordDebugEvent(slave_num,
                                            SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
@@ -1032,7 +1300,16 @@ void Slave_UpdateProcess(void)
                                            current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
-                        ctx->phase = SLAVE_UPD_PREPARE_BLOCK;
+                        /*
+                         * ACK пришел уже после фактического стирания блока.
+                         * Только теперь сдвигаем указатель, чтобы при NACK/timeout
+                         * повторить ровно тот же блок страниц.
+                         */
+                        ctx->erase_next_page = (uint16_t)(ctx->erase_next_page + ctx->erase_pages_in_block);
+                        ctx->erase_pages_in_block = 0u;
+                        ctx->phase = (ctx->erase_next_page <= ctx->erase_last_page)
+                                   ? SLAVE_UPD_SEND_EXT_ERASE_CMD
+                                   : SLAVE_UPD_PREPARE_BLOCK;
                         ctx->retry_count = 0u;
                         Slave_RecordPhaseTrace(ctx, current_tick);
                     }
@@ -1404,12 +1681,43 @@ void Slave_UpdateProcess(void)
                 break;
 
             case SLAVE_UPD_ERROR:
+            {
+                SlaveUpdatePhase_t report_phase;
+                uint8_t report_reason;
+                uint8_t report_response;
+
+                if ((g_slave_update_debug.fail_valid == 0u) ||
+                    (g_slave_update_debug.fail_slave_num != slave_num))
+                {
+                    SlaveUpdatePhase_t failed_phase = (SlaveUpdatePhase_t)g_slave_update_debug.last_phase;
+                    uint8_t failed_reason = g_slave_update_debug.last_reason;
+                    uint8_t failed_response = g_slave_update_debug.last_response;
+
+                    /*
+                     * Если ошибка была выставлена напрямую через ctx->phase = ERROR,
+                     * сохраняем последнюю осмысленную фазу из debug-события перед
+                     * очисткой контекста. Иначе после завершения опять будет чертов
+                     * IDLE/ERROR без ответа, где именно все умерло.
+                     */
+                    Slave_SaveFailureSnapshot(slave_num,
+                                              failed_phase,
+                                              failed_reason,
+                                              failed_reason,
+                                              failed_response,
+                                              ctx,
+                                              current_tick);
+                }
+
+                report_phase = (SlaveUpdatePhase_t)g_slave_update_debug.fail_phase;
+                report_reason = g_slave_update_debug.fail_terminal_reason;
+                report_response = g_slave_update_debug.fail_response;
+
                 Slave_FinishActiveUpdate(slave_num, false);
                 Slave_RecordDebugEvent(slave_num,
                                        SLAVE_UPDATE_DEBUG_EVENT_ERROR,
-                                       ctx->phase,
-                                       g_slave_update_debug.last_reason,
-                                       g_slave_update_debug.last_response,
+                                       report_phase,
+                                       report_reason,
+                                       report_response,
                                        ctx,
                                        current_tick);
                 slave.device[slave_num].need_update = 0u;
@@ -1417,6 +1725,7 @@ void Slave_UpdateProcess(void)
                 slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
                 memset(ctx, 0, sizeof(*ctx));
                 break;
+            }
 
             case SLAVE_UPD_IDLE:
             default:

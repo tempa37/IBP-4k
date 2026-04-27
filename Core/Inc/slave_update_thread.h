@@ -20,7 +20,19 @@ extern "C" {
 #define SLAVE_AUTO_UPDATE_ENABLE          1u
 #define SLAVE_BOOTLOADER_ENTRY_DELAY_MS   5000u
 #define SLAVE_BOOTLOADER_RESP_TIMEOUT_MS  1500u
-#define SLAVE_FLASH_TARGET_START_ADDR     FLASH_APP_START_ADDR
+
+/*
+ * Профиль прошиваемого slave: ST STM32L051C6.
+ *
+ * Это не карта flash master-контроллера. Нельзя, блядь, брать сюда
+ * FLASH_APP_START_ADDR от STM32F427, иначе ROM bootloader L051 закономерно
+ * отвечает NACK на адрес 0x08040000.
+ */
+#define SLAVE_FLASH_TARGET_START_ADDR     0x08000000UL
+#define SLAVE_FLASH_TARGET_SIZE_BYTES     (32u * 1024u)
+#define SLAVE_FLASH_PAGE_SIZE_BYTES       128u
+#define SLAVE_FLASH_ERASE_FIRST_PAGE      0u
+#define SLAVE_FLASH_ERASE_LAST_PAGE       ((SLAVE_FLASH_TARGET_SIZE_BYTES / SLAVE_FLASH_PAGE_SIZE_BYTES) - 1u)
 
 #define BOOTLOADER_ACK                    0x79u
 #define BOOTLOADER_NACK                   0x1Fu
@@ -30,6 +42,7 @@ extern "C" {
 #define BOOTLOADER_WRITE                  0x31u
 
 #define SLAVE_UPDATE_TRACE_DEPTH          64u
+#define SLAVE_UPDATE_DEBUG_TEXT_SIZE      32u
 
 #define SLAVE_UPDATE_DEBUG_EVENT_NONE     0u
 #define SLAVE_UPDATE_DEBUG_EVENT_DONE     1u
@@ -103,6 +116,28 @@ typedef struct
     volatile uint8_t success_mask;
     volatile uint8_t error_mask;
     volatile uint8_t active_slave;
+    volatile uint8_t fail_valid;
+    volatile uint8_t fail_slave_num;
+    volatile uint8_t fail_phase;
+    volatile uint8_t fail_event;
+    volatile uint8_t fail_terminal_reason;
+    volatile uint8_t fail_detail_reason;
+    volatile uint8_t fail_response;
+    volatile uint8_t fail_retry_count;
+    volatile uint8_t fail_ack;
+    volatile uint32_t fail_tick;
+    volatile uint32_t fail_last_command_tick;
+    volatile uint32_t fail_bytes_written;
+    volatile uint32_t fail_total_bytes;
+    volatile uint32_t fail_target_address;
+    volatile uint16_t fail_payload_size;
+    volatile uint16_t fail_padded_size;
+    volatile uint16_t fail_erase_next_page;
+    volatile uint16_t fail_erase_last_page;
+    volatile uint16_t fail_erase_pages_in_block;
+    volatile char fail_phase_text[SLAVE_UPDATE_DEBUG_TEXT_SIZE];
+    volatile char fail_reason_text[SLAVE_UPDATE_DEBUG_TEXT_SIZE];
+    volatile char fail_detail_text[SLAVE_UPDATE_DEBUG_TEXT_SIZE];
 } SlaveUpdateDebugInfo_t;
 
 typedef struct
