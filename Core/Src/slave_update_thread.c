@@ -9,6 +9,9 @@
 #include <string.h>
 
 #define SLAVE_UPDATE_INVALID_INDEX  0xFFu
+#define SLAVE_BOOT_RESP_NONE        0u
+#define SLAVE_BOOT_RESP_OK          1u
+#define SLAVE_BOOT_RESP_INVALID     2u
 
 extern ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT];
 
@@ -50,6 +53,7 @@ typedef struct
     uint32_t total_bytes;
     uint8_t retry_count;
     uint32_t last_command_tick;
+    uint8_t boot_resp_received;
     uint16_t payload_size;
     uint16_t padded_size;
     uint8_t write_buffer[SLAVE_FW_BLOCK_SIZE];
@@ -61,7 +65,9 @@ static volatile uint8_t slave_update_success_mask = 0u;
 static volatile uint8_t slave_update_error_mask = 0u;
 static volatile uint8_t slave_update_active_slave = SLAVE_UPDATE_INVALID_INDEX;
 static volatile uint8_t slave_update_auto_pending = 0u;
+static volatile uint8_t slave_boot_resp_state[UART_CHANNEL_COUNT] = {0};
 volatile SlaveUpdateDebugInfo_t g_slave_update_debug = {0};
+volatile SlaveUpdateTraceEntry_t g_slave_update_trace[SLAVE_UPDATE_TRACE_DEPTH] = {0};
 
 static bool Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, uint16_t length)
 {
@@ -111,6 +117,42 @@ static bool Slave_TakeBootloaderResponse(uint8_t slave_num, uint8_t *response)
     slave.device[slave_num].ack = 0u;
     *response = value;
     return true;
+}
+
+void Slave_OnModbusFrameReceived(uint8_t slave_num, const uint8_t *frame, size_t length)
+{
+    uint16_t crc_expected;
+    uint16_t crc_received;
+
+    if ((slave_num >= UART_CHANNEL_COUNT) || (frame == NULL) || (length < 2u))
+    {
+        return;
+    }
+
+    if (frame[0] != MODBUS_DEFAULT_SLAVE_ADDRESS)
+    {
+        return;
+    }
+
+    if ((length >= 8u) &&
+        (frame[1] == MODBUS_FUNC_WRITE_SINGLE_REG) &&
+        (frame[2] == 0x00u) &&
+        (frame[3] == 0x00u) &&
+        (frame[4] == 0x12u) &&
+        (frame[5] == 0x34u))
+    {
+        crc_expected = Modbus_CalculateCRC(frame, 6u);
+        crc_received = (uint16_t)frame[6] | ((uint16_t)frame[7] << 8);
+        slave_boot_resp_state[slave_num] = (crc_expected == crc_received)
+                                          ? SLAVE_BOOT_RESP_OK
+                                          : SLAVE_BOOT_RESP_INVALID;
+        return;
+    }
+
+    if (((frame[1] & 0x7Fu) == MODBUS_FUNC_WRITE_SINGLE_REG) && (length >= 5u))
+    {
+        slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_INVALID;
+    }
 }
 
 static uint8_t Slave_GetChannelBit(uint8_t slave_num)
@@ -192,18 +234,70 @@ static void Slave_UpdateDebugSnapshot(uint32_t current_tick)
     g_slave_update_debug.live_bytes_written = (ctx != NULL) ? ctx->bytes_written : 0u;
     g_slave_update_debug.live_total_bytes = (ctx != NULL) ? ctx->total_bytes : 0u;
     g_slave_update_debug.live_target_address = (ctx != NULL) ? ctx->target_address : 0u;
+    g_slave_update_debug.live_payload_size = (ctx != NULL) ? ctx->payload_size : 0u;
+    g_slave_update_debug.live_padded_size = (ctx != NULL) ? ctx->padded_size : 0u;
 }
 
 static void Slave_RecordDebugEvent(uint8_t slave_num,
                                    uint8_t event_code,
                                    SlaveUpdatePhase_t phase,
+                                   uint8_t reason,
+                                   uint8_t response,
+                                   const SlaveUpdateContext_t *ctx,
                                    uint32_t current_tick)
 {
-    g_slave_update_debug.event_counter++;
+    uint32_t write_index = g_slave_update_debug.trace_write_index;
+    uint32_t next_index = (write_index + 1u) % SLAVE_UPDATE_TRACE_DEPTH;
+    uint32_t sequence = g_slave_update_debug.event_counter + 1u;
+    volatile SlaveUpdateTraceEntry_t *entry = &g_slave_update_trace[write_index];
+
+    g_slave_update_debug.event_counter = sequence;
     g_slave_update_debug.last_event = event_code;
+    g_slave_update_debug.last_reason = reason;
+    g_slave_update_debug.last_response = response;
     g_slave_update_debug.last_slave_num = slave_num;
     g_slave_update_debug.last_phase = (uint8_t)phase;
+    g_slave_update_debug.trace_write_index = next_index;
+    if (g_slave_update_debug.trace_count < SLAVE_UPDATE_TRACE_DEPTH)
+    {
+        g_slave_update_debug.trace_count++;
+    }
+    else
+    {
+        g_slave_update_debug.trace_wrap_count++;
+    }
+
+    entry->sequence = sequence;
+    entry->tick = current_tick;
+    entry->bytes_written = (ctx != NULL) ? ctx->bytes_written : 0u;
+    entry->total_bytes = (ctx != NULL) ? ctx->total_bytes : 0u;
+    entry->target_address = (ctx != NULL) ? ctx->target_address : 0u;
+    entry->payload_size = (ctx != NULL) ? ctx->payload_size : 0u;
+    entry->padded_size = (ctx != NULL) ? ctx->padded_size : 0u;
+    entry->slave_num = slave_num;
+    entry->phase = (uint8_t)phase;
+    entry->event = event_code;
+    entry->reason = reason;
+    entry->response = response;
+    entry->retry_count = (ctx != NULL) ? ctx->retry_count : 0u;
+
     Slave_UpdateDebugSnapshot(current_tick);
+}
+
+static void Slave_RecordPhaseTrace(const SlaveUpdateContext_t *ctx, uint32_t current_tick)
+{
+    if (ctx == NULL)
+    {
+        return;
+    }
+
+    Slave_RecordDebugEvent(ctx->slave_number,
+                           SLAVE_UPDATE_DEBUG_EVENT_PHASE,
+                           ctx->phase,
+                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                           0u,
+                           ctx,
+                           current_tick);
 }
 
 static void Slave_FinishActiveUpdate(uint8_t slave_num, bool success)
@@ -239,6 +333,13 @@ static void Slave_StartNextPendingUpdate(void)
 {
     if (!Slave_HasStoredImageReady())
     {
+        Slave_RecordDebugEvent(SLAVE_UPDATE_INVALID_INDEX,
+                               SLAVE_UPDATE_DEBUG_EVENT_ERROR,
+                               SLAVE_UPD_IDLE,
+                               SLAVE_UPDATE_DEBUG_REASON_START_NO_IMAGE,
+                               0u,
+                               NULL,
+                               HAL_GetTick());
         Slave_MarkMaskedChannelsAsError(slave_update_pending_mask);
         slave_update_pending_mask = 0u;
         slave_update_active_slave = SLAVE_UPDATE_INVALID_INDEX;
@@ -266,12 +367,26 @@ static void Slave_StartNextPendingUpdate(void)
 
             if (!modbusSlaveData[slave_num].valid)
             {
+                Slave_RecordDebugEvent(slave_num,
+                                       SLAVE_UPDATE_DEBUG_EVENT_REJECTED,
+                                       SLAVE_UPD_IDLE,
+                                       SLAVE_UPDATE_DEBUG_REASON_START_DISCONNECTED,
+                                       0u,
+                                       NULL,
+                                       HAL_GetTick());
                 slave_update_error_mask |= channel_bit;
                 continue;
             }
 
             slave_update_active_slave = slave_num;
             slave.device[slave_num].need_update = 1u;
+            Slave_RecordDebugEvent(slave_num,
+                                   SLAVE_UPDATE_DEBUG_EVENT_START,
+                                   SLAVE_UPD_IDLE,
+                                   SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                   0u,
+                                   NULL,
+                                   HAL_GetTick());
             Slave_UpdateDebugSnapshot(HAL_GetTick());
             return;
         }
@@ -285,17 +400,40 @@ static bool Slave_RequestUpdateMask(uint8_t request_mask)
 {
     if ((SLAVE_FW_SEND_ENABLE == 0u) || !Slave_HasStoredImageReady())
     {
+        Slave_RecordDebugEvent(SLAVE_UPDATE_INVALID_INDEX,
+                               SLAVE_UPDATE_DEBUG_EVENT_REJECTED,
+                               SLAVE_UPD_IDLE,
+                               (SLAVE_FW_SEND_ENABLE == 0u)
+                                   ? SLAVE_UPDATE_DEBUG_REASON_DISABLED
+                                   : SLAVE_UPDATE_DEBUG_REASON_REQUEST_NO_IMAGE,
+                               0u,
+                               NULL,
+                               HAL_GetTick());
         return false;
     }
 
     request_mask &= Slave_GetConnectedMask();
     if (request_mask == 0u)
     {
+        Slave_RecordDebugEvent(SLAVE_UPDATE_INVALID_INDEX,
+                               SLAVE_UPDATE_DEBUG_EVENT_REJECTED,
+                               SLAVE_UPD_IDLE,
+                               SLAVE_UPDATE_DEBUG_REASON_REQUEST_NO_TARGETS,
+                               0u,
+                               NULL,
+                               HAL_GetTick());
         return false;
     }
 
     if (Slave_IsAnyUpdateRunning())
     {
+        Slave_RecordDebugEvent(SLAVE_UPDATE_INVALID_INDEX,
+                               SLAVE_UPDATE_DEBUG_EVENT_REJECTED,
+                               SLAVE_UPD_IDLE,
+                               SLAVE_UPDATE_DEBUG_REASON_REQUEST_BUSY,
+                               0u,
+                               NULL,
+                               HAL_GetTick());
         return false;
     }
 
@@ -303,6 +441,13 @@ static bool Slave_RequestUpdateMask(uint8_t request_mask)
     Slave_ResetBatchState();
     slave_update_pending_mask = request_mask;
     slave_update_auto_pending = 0u;
+    Slave_RecordDebugEvent(SLAVE_UPDATE_INVALID_INDEX,
+                           SLAVE_UPDATE_DEBUG_EVENT_REQUEST,
+                           SLAVE_UPD_IDLE,
+                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                           0u,
+                           NULL,
+                           HAL_GetTick());
     Slave_UpdateDebugSnapshot(HAL_GetTick());
     taskEXIT_CRITICAL();
 
@@ -342,6 +487,9 @@ static SlaveUpdatePhase_t Slave_GetRetryPhase(SlaveUpdatePhase_t phase)
 {
     switch (phase)
     {
+        case SLAVE_UPD_WAIT_BOOTLOADER_ENTRY:
+            return SLAVE_UPD_SEND_ENTER_BOOTLOADER;
+
         case SLAVE_UPD_WAIT_ACK_SYNC:
             return SLAVE_UPD_SEND_ENTER_BOOTLOADER;
 
@@ -371,7 +519,9 @@ static SlaveUpdatePhase_t Slave_GetRetryPhase(SlaveUpdatePhase_t phase)
     }
 }
 
-static void Slave_ScheduleRetryOrError(SlaveUpdateContext_t *ctx, uint32_t current_tick)
+static void Slave_ScheduleRetryOrError(SlaveUpdateContext_t *ctx,
+                                       uint8_t reason,
+                                       uint32_t current_tick)
 {
     if (ctx == NULL)
     {
@@ -384,10 +534,25 @@ static void Slave_ScheduleRetryOrError(SlaveUpdateContext_t *ctx, uint32_t curre
         ctx->phase = Slave_GetRetryPhase(ctx->phase);
         ctx->last_command_tick = current_tick;
         slave.device[ctx->slave_number].ack = 0u;
+        Slave_RecordDebugEvent(ctx->slave_number,
+                               SLAVE_UPDATE_DEBUG_EVENT_RETRY,
+                               ctx->phase,
+                               reason,
+                               0u,
+                               ctx,
+                               current_tick);
+        Slave_RecordPhaseTrace(ctx, current_tick);
     }
     else
     {
         ctx->phase = SLAVE_UPD_ERROR;
+        Slave_RecordDebugEvent(ctx->slave_number,
+                               SLAVE_UPDATE_DEBUG_EVENT_ERROR,
+                               ctx->phase,
+                               SLAVE_UPDATE_DEBUG_REASON_RETRY_LIMIT,
+                               0u,
+                               ctx,
+                               current_tick);
     }
 }
 
@@ -421,12 +586,21 @@ static bool Slave_PrepareNextDataBlock(SlaveUpdateContext_t *ctx)
 
 void Slave_CancelPendingUpdates(void)
 {
+    Slave_RecordDebugEvent(slave_update_active_slave,
+                           SLAVE_UPDATE_DEBUG_EVENT_CANCEL,
+                           SLAVE_UPD_IDLE,
+                           SLAVE_UPDATE_DEBUG_REASON_CANCELLED,
+                           0u,
+                           NULL,
+                           HAL_GetTick());
+
     taskENTER_CRITICAL();
 
     for (uint8_t slave_num = 0u; slave_num < UART_CHANNEL_COUNT; ++slave_num)
     {
         slave.device[slave_num].need_update = 0u;
         slave.device[slave_num].ack = 0u;
+        slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
         memset(&slave_update_ctx[slave_num], 0, sizeof(slave_update_ctx[slave_num]));
     }
 
@@ -471,11 +645,27 @@ bool Slave_RequestAutoConnectedUpdate(void)
 {
     if ((SLAVE_FW_SEND_ENABLE == 0u) || !Slave_HasStoredImageReady())
     {
+        Slave_RecordDebugEvent(SLAVE_UPDATE_INVALID_INDEX,
+                               SLAVE_UPDATE_DEBUG_EVENT_REJECTED,
+                               SLAVE_UPD_IDLE,
+                               (SLAVE_FW_SEND_ENABLE == 0u)
+                                   ? SLAVE_UPDATE_DEBUG_REASON_DISABLED
+                                   : SLAVE_UPDATE_DEBUG_REASON_REQUEST_NO_IMAGE,
+                               0u,
+                               NULL,
+                               HAL_GetTick());
         return false;
     }
 
     taskENTER_CRITICAL();
     slave_update_auto_pending = 1u;
+    Slave_RecordDebugEvent(SLAVE_UPDATE_INVALID_INDEX,
+                           SLAVE_UPDATE_DEBUG_EVENT_AUTO,
+                           SLAVE_UPD_IDLE,
+                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                           0u,
+                           NULL,
+                           HAL_GetTick());
     Slave_UpdateDebugSnapshot(HAL_GetTick());
     taskEXIT_CRITICAL();
 
@@ -544,19 +734,36 @@ void Slave_UpdateProcess(void)
                 (ctx->total_bytes > FLASH_APP_SIZE))
             {
                 ctx->phase = SLAVE_UPD_ERROR;
+                Slave_RecordDebugEvent(slave_num,
+                                       SLAVE_UPDATE_DEBUG_EVENT_ERROR,
+                                       ctx->phase,
+                                       SLAVE_UPDATE_DEBUG_REASON_INVALID_SIZE,
+                                       0u,
+                                       ctx,
+                                       current_tick);
             }
             else
             {
                 ctx->app_start_address = SLAVE_FLASH_TARGET_START_ADDR;
                 ctx->target_address = ctx->app_start_address;
                 ctx->phase = SLAVE_UPD_SEND_ENTER_BOOTLOADER;
+                Slave_RecordPhaseTrace(ctx, current_tick);
             }
         }
 
         if (Slave_IsAckWaitPhase(ctx->phase) &&
             ((current_tick - ctx->last_command_tick) > Slave_GetPhaseTimeoutMs(ctx->phase)))
         {
-            Slave_ScheduleRetryOrError(ctx, current_tick);
+            Slave_RecordDebugEvent(ctx->slave_number,
+                                   SLAVE_UPDATE_DEBUG_EVENT_TIMEOUT,
+                                   ctx->phase,
+                                   SLAVE_UPDATE_DEBUG_REASON_TIMEOUT,
+                                   slave.device[ctx->slave_number].ack,
+                                   ctx,
+                                   current_tick);
+            Slave_ScheduleRetryOrError(ctx,
+                                       SLAVE_UPDATE_DEBUG_REASON_TIMEOUT,
+                                       current_tick);
         }
 
         switch (ctx->phase)
@@ -575,27 +782,94 @@ void Slave_UpdateProcess(void)
                 crc = Modbus_CalculateCRC(modbus_cmd, 6u);
                 modbus_cmd[6] = (uint8_t)(crc & 0xFFu);
                 modbus_cmd[7] = (uint8_t)((crc >> 8) & 0xFFu);
+                slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
+                ctx->boot_resp_received = 0u;
 
                 if (Slave_SendBootloaderCommand(slave_num, modbus_cmd, sizeof(modbus_cmd)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_BOOTLOADER_ENTRY;
                     ctx->last_command_tick = current_tick;
-                    ctx->retry_count = 0u;
                     slave.device[slave_num].ack = 0u;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
             }
 
             case SLAVE_UPD_WAIT_BOOTLOADER_ENTRY:
-                if ((current_tick - ctx->last_command_tick) >= SLAVE_BOOTLOADER_ENTRY_DELAY_MS)
+            {
+                uint8_t boot_resp_state = slave_boot_resp_state[slave_num];
+
+                if ((ctx->boot_resp_received == 0u) && (boot_resp_state == SLAVE_BOOT_RESP_OK))
+                {
+                    ctx->boot_resp_received = 1u;
+                    ctx->retry_count = 0u;
+                    slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_BOOT_RESP,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           MODBUS_FUNC_WRITE_SINGLE_REG,
+                                           ctx,
+                                           current_tick);
+                }
+                else if (boot_resp_state == SLAVE_BOOT_RESP_INVALID)
+                {
+                    slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_BOOT_RESP,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_INVALID,
+                                           0u,
+                                           ctx,
+                                           current_tick);
+                    Slave_ScheduleRetryOrError(ctx,
+                                               SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_INVALID,
+                                               current_tick);
+                    break;
+                }
+
+                if ((ctx->boot_resp_received == 0u) &&
+                    ((current_tick - ctx->last_command_tick) > SLAVE_BOOTLOADER_RESP_TIMEOUT_MS))
+                {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TIMEOUT,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_TIMEOUT,
+                                           0u,
+                                           ctx,
+                                           current_tick);
+                    Slave_ScheduleRetryOrError(ctx,
+                                               SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_TIMEOUT,
+                                               current_tick);
+                    break;
+                }
+
+                if (ctx->boot_resp_received != 0u &&
+                    ((current_tick - ctx->last_command_tick) >= SLAVE_BOOTLOADER_ENTRY_DELAY_MS))
                 {
                     ctx->phase = SLAVE_UPD_SEND_SYNC;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 break;
+            }
 
             case SLAVE_UPD_SEND_SYNC:
             {
@@ -603,11 +877,26 @@ void Slave_UpdateProcess(void)
 
                 if (Slave_SendBootloaderCommand(slave_num, &sync_cmd, 1u))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_SYNC;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -616,14 +905,26 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_SYNC:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->phase = SLAVE_UPD_SEND_EXT_ERASE_CMD;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -634,11 +935,26 @@ void Slave_UpdateProcess(void)
 
                 if (Slave_SendBootloaderCommand(slave_num, erase_cmd, sizeof(erase_cmd)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_EXT_ERASE_CMD;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -647,14 +963,26 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_EXT_ERASE_CMD:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->phase = SLAVE_UPD_SEND_EXT_ERASE_PAYLOAD;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -665,11 +993,26 @@ void Slave_UpdateProcess(void)
 
                 if (Slave_SendBootloaderCommand(slave_num, mass_erase_payload, sizeof(mass_erase_payload)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_EXT_ERASE_PAYLOAD;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -678,14 +1021,26 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_EXT_ERASE_PAYLOAD:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->phase = SLAVE_UPD_PREPARE_BLOCK;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -694,6 +1049,17 @@ void Slave_UpdateProcess(void)
                 if (!Slave_PrepareNextDataBlock(ctx))
                 {
                     ctx->phase = SLAVE_UPD_ERROR;
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ERROR,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_INVALID_SIZE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
+                }
+                else
+                {
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 break;
 
@@ -703,11 +1069,26 @@ void Slave_UpdateProcess(void)
 
                 if (Slave_SendBootloaderCommand(slave_num, write_cmd, sizeof(write_cmd)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_WRITE_CMD;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -716,14 +1097,26 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_WRITE_CMD:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->phase = SLAVE_UPD_SEND_ADDRESS;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -740,11 +1133,26 @@ void Slave_UpdateProcess(void)
 
                 if (Slave_SendBootloaderCommand(slave_num, addr_cmd, sizeof(addr_cmd)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_ADDRESS;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -753,14 +1161,26 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_ADDRESS:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->phase = SLAVE_UPD_SEND_DATA;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -785,11 +1205,26 @@ void Slave_UpdateProcess(void)
                                                 data_packet,
                                                 (uint16_t)(ctx->padded_size + 2u)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_DATA;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -798,16 +1233,28 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_DATA:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->bytes_written += ctx->payload_size;
                         ctx->target_address += ctx->padded_size;
                         ctx->phase = SLAVE_UPD_NEXT_BLOCK;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -816,6 +1263,7 @@ void Slave_UpdateProcess(void)
                 ctx->phase = (ctx->bytes_written < ctx->total_bytes)
                            ? SLAVE_UPD_PREPARE_BLOCK
                            : SLAVE_UPD_SEND_GO_CMD;
+                Slave_RecordPhaseTrace(ctx, current_tick);
                 break;
 
             case SLAVE_UPD_SEND_GO_CMD:
@@ -824,11 +1272,26 @@ void Slave_UpdateProcess(void)
 
                 if (Slave_SendBootloaderCommand(slave_num, go_cmd, sizeof(go_cmd)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_GO_CMD;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -837,14 +1300,26 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_GO_CMD:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->phase = SLAVE_UPD_SEND_GO_ADDRESS;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -861,11 +1336,26 @@ void Slave_UpdateProcess(void)
 
                 if (Slave_SendBootloaderCommand(slave_num, addr_cmd, sizeof(addr_cmd)))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_OK,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_WAIT_ACK_GO_ADDRESS;
                     ctx->last_command_tick = current_tick;
+                    Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 else
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_TX_FAIL,
+                                           ctx->phase,
+                                           SLAVE_UPDATE_DEBUG_REASON_UART_TX_FAILED,
+                                           0u,
+                                           ctx,
+                                           current_tick);
                     ctx->phase = SLAVE_UPD_ERROR;
                 }
                 break;
@@ -874,14 +1364,26 @@ void Slave_UpdateProcess(void)
             case SLAVE_UPD_WAIT_ACK_GO_ADDRESS:
                 if (Slave_TakeBootloaderResponse(slave_num, &response))
                 {
+                    Slave_RecordDebugEvent(slave_num,
+                                           SLAVE_UPDATE_DEBUG_EVENT_ACK_RX,
+                                           ctx->phase,
+                                           (response == BOOTLOADER_ACK)
+                                               ? SLAVE_UPDATE_DEBUG_REASON_NONE
+                                               : SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                           response,
+                                           ctx,
+                                           current_tick);
                     if (response == BOOTLOADER_ACK)
                     {
                         ctx->phase = SLAVE_UPD_DONE;
                         ctx->retry_count = 0u;
+                        Slave_RecordPhaseTrace(ctx, current_tick);
                     }
                     else
                     {
-                        Slave_ScheduleRetryOrError(ctx, current_tick);
+                        Slave_ScheduleRetryOrError(ctx,
+                                                   SLAVE_UPDATE_DEBUG_REASON_NACK,
+                                                   current_tick);
                     }
                 }
                 break;
@@ -891,9 +1393,13 @@ void Slave_UpdateProcess(void)
                 Slave_RecordDebugEvent(slave_num,
                                        SLAVE_UPDATE_DEBUG_EVENT_DONE,
                                        ctx->phase,
+                                       SLAVE_UPDATE_DEBUG_REASON_NONE,
+                                       0u,
+                                       ctx,
                                        current_tick);
                 slave.device[slave_num].need_update = 0u;
                 slave.device[slave_num].ack = 0u;
+                slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
                 memset(ctx, 0, sizeof(*ctx));
                 break;
 
@@ -902,9 +1408,13 @@ void Slave_UpdateProcess(void)
                 Slave_RecordDebugEvent(slave_num,
                                        SLAVE_UPDATE_DEBUG_EVENT_ERROR,
                                        ctx->phase,
+                                       g_slave_update_debug.last_reason,
+                                       g_slave_update_debug.last_response,
+                                       ctx,
                                        current_tick);
                 slave.device[slave_num].need_update = 0u;
                 slave.device[slave_num].ack = 0u;
+                slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
                 memset(ctx, 0, sizeof(*ctx));
                 break;
 

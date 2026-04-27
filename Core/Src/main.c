@@ -133,6 +133,82 @@ typedef struct {
 #define FW_IMAGE_KIND_MASTER    1u    /* В staging-слоте лежит master firmware IBP-4k. */
 #define FW_IMAGE_KIND_SLAVE     2u    /* В staging-слоте лежит slave firmware. */
 
+#define FW_UPDATE_TRACE_DEPTH                32u
+
+#define FW_UPDATE_DEBUG_EVENT_NONE           0u
+#define FW_UPDATE_DEBUG_EVENT_BEGIN_RX       1u
+#define FW_UPDATE_DEBUG_EVENT_BEGIN_ACCEPT   2u
+#define FW_UPDATE_DEBUG_EVENT_BEGIN_REJECT   3u
+#define FW_UPDATE_DEBUG_EVENT_BLOCK_WRITTEN  4u
+#define FW_UPDATE_DEBUG_EVENT_SESSION_DONE   5u
+#define FW_UPDATE_DEBUG_EVENT_METADATA_OK    6u
+#define FW_UPDATE_DEBUG_EVENT_METADATA_FAIL  7u
+#define FW_UPDATE_DEBUG_EVENT_AUTOSTART_OK   8u
+#define FW_UPDATE_DEBUG_EVENT_AUTOSTART_FAIL 9u
+#define FW_UPDATE_DEBUG_EVENT_FLASH_ERROR    10u
+#define FW_UPDATE_DEBUG_EVENT_START_CMD      11u
+
+#define FW_UPDATE_DEBUG_STAGE_IDLE           0u
+#define FW_UPDATE_DEBUG_STAGE_BEGIN          1u
+#define FW_UPDATE_DEBUG_STAGE_RX             2u
+#define FW_UPDATE_DEBUG_STAGE_STORED         3u
+#define FW_UPDATE_DEBUG_STAGE_SLAVE_START    4u
+#define FW_UPDATE_DEBUG_STAGE_DONE           5u
+#define FW_UPDATE_DEBUG_STAGE_ERROR          6u
+
+#define FW_UPDATE_DEBUG_REASON_NONE              0u
+#define FW_UPDATE_DEBUG_REASON_BUSY              1u
+#define FW_UPDATE_DEBUG_REASON_BAD_BEGIN         2u
+#define FW_UPDATE_DEBUG_REASON_BAD_IMAGE         3u
+#define FW_UPDATE_DEBUG_REASON_ERASE_FAILED      4u
+#define FW_UPDATE_DEBUG_REASON_METADATA_FAILED   5u
+#define FW_UPDATE_DEBUG_REASON_FLASH_WRITE_FAILED 6u
+#define FW_UPDATE_DEBUG_REASON_BAD_DATA          7u
+#define FW_UPDATE_DEBUG_REASON_CRC_FAILED        8u
+#define FW_UPDATE_DEBUG_REASON_AUTO_REQUEST_FAILED 9u
+
+typedef struct {
+    uint32_t sequence;
+    uint32_t tick;
+    uint32_t imageSizeBytes;
+    uint32_t bytesWritten;
+    uint32_t writeAddress;
+    uint16_t totalBlocks;
+    uint16_t currentBlock;
+    uint16_t packetIndex;
+    uint16_t msgId;
+    uint8_t event;
+    uint8_t stage;
+    uint8_t reason;
+    uint8_t imageKind;
+    uint8_t srcNode;
+    uint8_t dataLength;
+    uint8_t packetInBlock;
+} FirmwareUpdateTraceEntry_t;
+
+typedef struct {
+    volatile uint32_t eventCounter;
+    volatile uint32_t traceWriteIndex;
+    volatile uint32_t traceCount;
+    volatile uint32_t traceWrapCount;
+    volatile uint32_t lastTick;
+    volatile uint32_t lastImageSizeBytes;
+    volatile uint32_t lastBytesWritten;
+    volatile uint32_t lastWriteAddress;
+    volatile uint16_t lastTotalBlocks;
+    volatile uint16_t lastBlockNum;
+    volatile uint16_t lastPacketIndex;
+    volatile uint16_t lastMsgId;
+    volatile uint8_t lastEvent;
+    volatile uint8_t lastStage;
+    volatile uint8_t lastReason;
+    volatile uint8_t lastImageKind;
+    volatile uint8_t lastSrcNode;
+    volatile uint8_t lastDataLength;
+    volatile uint8_t lastPacketInBlock;
+    volatile uint8_t sessionActive;
+} FirmwareUpdateDebugInfo_t;
+
 /*
  * Два шаблона состояния нужны только для разделения логики master/slave.
  * Физическая flash-область при этом одна общая, а активен в каждый момент
@@ -141,6 +217,8 @@ typedef struct {
 static FirmwareUpdateState_t slaveFwState = {0};
 static FirmwareUpdateState_t masterFwState = {0};
 static FirmwareUpdateState_t *activeFwState = NULL;
+volatile FirmwareUpdateDebugInfo_t g_fw_update_debug = {0};
+volatile FirmwareUpdateTraceEntry_t g_fw_update_trace[FW_UPDATE_TRACE_DEPTH] = {0};
 
 /*
  * RAM-копия persistent metadata из flash.
@@ -173,6 +251,7 @@ HAL_StatusTypeDef FLASH_EraseSectors(uint32_t firstSector, uint32_t lastSector);
 HAL_StatusTypeDef FLASH_WriteBuffer(uint32_t dstAddress, const uint8_t *src, uint32_t length);                            //записывает буффер во флеш 
 static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                                 uint8_t dstNode,
+                                uint16_t msgId,
                                 const uint8_t *canData,
                                 uint8_t dataLength);  //Обработка кадра CAN с обновлением
 
@@ -199,6 +278,16 @@ static HAL_StatusTypeDef FW_WriteStoredImageInfo(uint8_t imageKind,
 static bool FW_VerifyStoredImageCrc(const FirmwareUpdateState_t *state,
                                     uint32_t *calculatedCrc,
                                     uint32_t *storedCrc);
+static uint8_t FW_GetImageKindByState(const FirmwareUpdateState_t *state);
+static void FW_RecordDebugEvent(const FirmwareUpdateState_t *state,
+                                uint8_t srcNode,
+                                uint16_t msgId,
+                                uint8_t dataLength,
+                                uint16_t packetIndex,
+                                uint8_t packetInBlock,
+                                uint8_t event,
+                                uint8_t stage,
+                                uint8_t reason);
 uint32_t compute_flash_crc(uint32_t startAddress, uint32_t length);
 
 
@@ -769,6 +858,7 @@ void StartTask02(void const * argument)
       }
       else
       {
+        Slave_OnModbusFrameReceived((uint8_t)index, localBuffer, length);
         
         (void)Modbus_SaveResponse(modbusBuffer, localBuffer, length);
         
@@ -1411,6 +1501,84 @@ static bool FW_VerifyStoredImageCrc(const FirmwareUpdateState_t *state,
     return (*calculatedCrc == *storedCrc);
 }
 
+static uint8_t FW_GetImageKindByState(const FirmwareUpdateState_t *state)
+{
+    if (state == &masterFwState)
+    {
+        return FW_IMAGE_KIND_MASTER;
+    }
+
+    if (state == &slaveFwState)
+    {
+        return FW_IMAGE_KIND_SLAVE;
+    }
+
+    return FW_IMAGE_KIND_NONE;
+}
+
+static void FW_RecordDebugEvent(const FirmwareUpdateState_t *state,
+                                uint8_t srcNode,
+                                uint16_t msgId,
+                                uint8_t dataLength,
+                                uint16_t packetIndex,
+                                uint8_t packetInBlock,
+                                uint8_t event,
+                                uint8_t stage,
+                                uint8_t reason)
+{
+    uint32_t tick = HAL_GetTick();
+    uint32_t writeIndex = g_fw_update_debug.traceWriteIndex;
+    uint32_t nextIndex = (writeIndex + 1u) % FW_UPDATE_TRACE_DEPTH;
+    uint32_t sequence = g_fw_update_debug.eventCounter + 1u;
+    uint8_t imageKind = FW_GetImageKindByState(state);
+    volatile FirmwareUpdateTraceEntry_t *entry = &g_fw_update_trace[writeIndex];
+
+    g_fw_update_debug.eventCounter = sequence;
+    g_fw_update_debug.traceWriteIndex = nextIndex;
+    if (g_fw_update_debug.traceCount < FW_UPDATE_TRACE_DEPTH)
+    {
+        g_fw_update_debug.traceCount++;
+    }
+    else
+    {
+        g_fw_update_debug.traceWrapCount++;
+    }
+
+    g_fw_update_debug.lastTick = tick;
+    g_fw_update_debug.lastEvent = event;
+    g_fw_update_debug.lastStage = stage;
+    g_fw_update_debug.lastReason = reason;
+    g_fw_update_debug.lastImageKind = imageKind;
+    g_fw_update_debug.lastSrcNode = srcNode;
+    g_fw_update_debug.lastMsgId = msgId;
+    g_fw_update_debug.lastDataLength = dataLength;
+    g_fw_update_debug.lastPacketIndex = packetIndex;
+    g_fw_update_debug.lastPacketInBlock = packetInBlock;
+    g_fw_update_debug.lastImageSizeBytes = (state != NULL) ? state->imageSizeBytes : 0u;
+    g_fw_update_debug.lastBytesWritten = (state != NULL) ? state->bytesWritten : 0u;
+    g_fw_update_debug.lastWriteAddress = (state != NULL) ? state->writeAddress : 0u;
+    g_fw_update_debug.lastTotalBlocks = (state != NULL) ? state->totalBlocksExpected : 0u;
+    g_fw_update_debug.lastBlockNum = (state != NULL) ? state->currentBlockNum : 0u;
+    g_fw_update_debug.sessionActive = ((state != NULL) && state->updateInProgress) ? 1u : 0u;
+
+    entry->sequence = sequence;
+    entry->tick = tick;
+    entry->imageSizeBytes = g_fw_update_debug.lastImageSizeBytes;
+    entry->bytesWritten = g_fw_update_debug.lastBytesWritten;
+    entry->writeAddress = g_fw_update_debug.lastWriteAddress;
+    entry->totalBlocks = g_fw_update_debug.lastTotalBlocks;
+    entry->currentBlock = g_fw_update_debug.lastBlockNum;
+    entry->packetIndex = packetIndex;
+    entry->msgId = msgId;
+    entry->event = event;
+    entry->stage = stage;
+    entry->reason = reason;
+    entry->imageKind = imageKind;
+    entry->srcNode = srcNode;
+    entry->dataLength = dataLength;
+    entry->packetInBlock = packetInBlock;
+}
+
 /*
  * Отправка ACK по CAN для протокола обновления.
  *
@@ -1470,9 +1638,29 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
             HAL_StatusTypeDef eraseStatus = HAL_ERROR;
             HAL_StatusTypeDef metadataStatus = HAL_ERROR;
             FirmwareUpdateState_t *selectedState = NULL;
+            bool blocksMatch = false;
+
+            FW_RecordDebugEvent(NULL,
+                                srcNode,
+                                msgId,
+                                dataLength,
+                                0u,
+                                0u,
+                                FW_UPDATE_DEBUG_EVENT_BEGIN_RX,
+                                FW_UPDATE_DEBUG_STAGE_BEGIN,
+                                FW_UPDATE_DEBUG_REASON_NONE);
 
             if (Slave_IsAnyUpdateRunning())
             {
+                FW_RecordDebugEvent(NULL,
+                                    srcNode,
+                                    msgId,
+                                    dataLength,
+                                    0u,
+                                    0u,
+                                    FW_UPDATE_DEBUG_EVENT_BEGIN_REJECT,
+                                    FW_UPDATE_DEBUG_STAGE_ERROR,
+                                    FW_UPDATE_DEBUG_REASON_BUSY);
                 FW_SendAck(srcNode, responseData, 1u);
                 return true;
             }
@@ -1483,13 +1671,23 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
                                       &imageSizeBytes,
                                       &imageSizeExact))
             {
+                FW_RecordDebugEvent(NULL,
+                                    srcNode,
+                                    msgId,
+                                    dataLength,
+                                    0u,
+                                    0u,
+                                    FW_UPDATE_DEBUG_EVENT_BEGIN_REJECT,
+                                    FW_UPDATE_DEBUG_STAGE_ERROR,
+                                    FW_UPDATE_DEBUG_REASON_BAD_BEGIN);
                 FW_SendAck(srcNode, responseData, 1u);
                 return true;
             }
 
             selectedState = FW_SelectStateByImageSize(imageSizeBytes);
-            if ((selectedState != NULL) &&
-                (totalBlocks == FW_CalculateExpectedBlocks(imageSizeBytes)))
+            blocksMatch = (totalBlocks == FW_CalculateExpectedBlocks(imageSizeBytes));
+
+            if ((selectedState != NULL) && blocksMatch)
             {
                 eraseStatus = FW_EraseStorageForState(selectedState);
                 if (eraseStatus == HAL_OK)
@@ -1503,7 +1701,7 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
             if ((selectedState != NULL) &&
                 (eraseStatus == HAL_OK) &&
                 (metadataStatus == HAL_OK) &&
-                (totalBlocks == FW_CalculateExpectedBlocks(imageSizeBytes)))
+                blocksMatch)
             {
                 memset(&slaveFwState, 0, sizeof(slaveFwState));
                 memset(&masterFwState, 0, sizeof(masterFwState));
@@ -1524,10 +1722,56 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
                 Slave_CancelPendingUpdates();
                 activeFwState = selectedState;
                 responseData[0] = 0xFFu;
+                FW_RecordDebugEvent(selectedState,
+                                    srcNode,
+                                    msgId,
+                                    dataLength,
+                                    0u,
+                                    0u,
+                                    FW_UPDATE_DEBUG_EVENT_BEGIN_ACCEPT,
+                                    FW_UPDATE_DEBUG_STAGE_BEGIN,
+                                    FW_UPDATE_DEBUG_REASON_NONE);
             }
             else
             {
                 activeFwState = NULL;
+                if ((selectedState == NULL) || !blocksMatch)
+                {
+                    FW_RecordDebugEvent(NULL,
+                                        srcNode,
+                                        msgId,
+                                        dataLength,
+                                        0u,
+                                        0u,
+                                        FW_UPDATE_DEBUG_EVENT_BEGIN_REJECT,
+                                        FW_UPDATE_DEBUG_STAGE_ERROR,
+                                        FW_UPDATE_DEBUG_REASON_BAD_IMAGE);
+                }
+                else if (eraseStatus != HAL_OK)
+                {
+                    FW_RecordDebugEvent(selectedState,
+                                        srcNode,
+                                        msgId,
+                                        dataLength,
+                                        0u,
+                                        0u,
+                                        FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                                        FW_UPDATE_DEBUG_STAGE_ERROR,
+                                        FW_UPDATE_DEBUG_REASON_ERASE_FAILED);
+                }
+                else if (metadataStatus != HAL_OK)
+                {
+                    FW_RecordDebugEvent(selectedState,
+                                        srcNode,
+                                        msgId,
+                                        dataLength,
+                                        0u,
+                                        0u,
+                                        FW_UPDATE_DEBUG_EVENT_METADATA_FAIL,
+                                        FW_UPDATE_DEBUG_STAGE_ERROR,
+                                        FW_UPDATE_DEBUG_REASON_METADATA_FAILED);
+                }
+
                 if ((selectedState != NULL) &&
                     ((eraseStatus != HAL_OK) || (metadataStatus != HAL_OK)))
                 {
@@ -1546,7 +1790,7 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
              * Источник истины здесь не message ID, а activeFwState, который был
              * выбран и инициализирован на этапе BEGIN.
              */
-            FW_HandleDataPacket(activeFwState, srcNode, canData, dataLength);
+            FW_HandleDataPacket(activeFwState, srcNode, msgId, canData, dataLength);
             return true;
 
         case CAN_MSG_FW_SLAVE_UPDATE_START:
@@ -1569,6 +1813,18 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
 
             responseData[0] = slaveNum;
             responseData[1] = requestAccepted ? 0xFFu : 0x00u;
+
+            FW_RecordDebugEvent(&slaveFwState,
+                                srcNode,
+                                msgId,
+                                dataLength,
+                                0u,
+                                0u,
+                                FW_UPDATE_DEBUG_EVENT_START_CMD,
+                                FW_UPDATE_DEBUG_STAGE_SLAVE_START,
+                                requestAccepted
+                                    ? FW_UPDATE_DEBUG_REASON_NONE
+                                    : FW_UPDATE_DEBUG_REASON_AUTO_REQUEST_FAILED);
 
             FW_SendAck(srcNode, responseData, 2u);
             return true;
@@ -1599,17 +1855,36 @@ static bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canDat
  */
 static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                                 uint8_t dstNode,
+                                uint16_t msgId,
                                 const uint8_t *canData,
                                 uint8_t dataLength)
 {
     // Проверки корректности
     if (!state || !canData || dataLength < 3u)
     {
+        FW_RecordDebugEvent(state,
+                            dstNode,
+                            msgId,
+                            dataLength,
+                            0u,
+                            0u,
+                            FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                            FW_UPDATE_DEBUG_STAGE_ERROR,
+                            FW_UPDATE_DEBUG_REASON_BAD_DATA);
         return;  // Некорректные данные
     }
 
     if (!state->updateInProgress)
     {
+        FW_RecordDebugEvent(state,
+                            dstNode,
+                            msgId,
+                            dataLength,
+                            0u,
+                            0u,
+                            FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                            FW_UPDATE_DEBUG_STAGE_ERROR,
+                            FW_UPDATE_DEBUG_REASON_BAD_DATA);
         return;  // Обновление не инициализировано
     }
 
@@ -1673,6 +1948,15 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
         {
             state->updateInProgress = false;
             activeFwState = NULL;
+            FW_RecordDebugEvent(state,
+                                dstNode,
+                                msgId,
+                                dataLength,
+                                globalPacketIndex,
+                                packetNumInBlock,
+                                FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                                FW_UPDATE_DEBUG_STAGE_ERROR,
+                                FW_UPDATE_DEBUG_REASON_BAD_DATA);
             return;
         }
 
@@ -1688,6 +1972,15 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
         {
             state->updateInProgress = false;
             activeFwState = NULL;
+            FW_RecordDebugEvent(state,
+                                dstNode,
+                                msgId,
+                                dataLength,
+                                globalPacketIndex,
+                                packetNumInBlock,
+                                FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                                FW_UPDATE_DEBUG_STAGE_ERROR,
+                                FW_UPDATE_DEBUG_REASON_FLASH_WRITE_FAILED);
             CAN_ReportFlashWriteError();
             return;
         }
@@ -1699,6 +1992,15 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
 
         // Отправляем extended ACK c номером записанного блока
         FW_SendAck(dstNode, ackData, 2u);
+        FW_RecordDebugEvent(state,
+                            dstNode,
+                            msgId,
+                            dataLength,
+                            globalPacketIndex,
+                            packetNumInBlock,
+                            FW_UPDATE_DEBUG_EVENT_BLOCK_WRITTEN,
+                            FW_UPDATE_DEBUG_STAGE_RX,
+                            FW_UPDATE_DEBUG_REASON_NONE);
 
         // Переходим к следующему блоку
         state->currentBlockNum++;
@@ -1720,6 +2022,15 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
         {
             state->updateInProgress = false;
             activeFwState = NULL;
+            FW_RecordDebugEvent(state,
+                                dstNode,
+                                msgId,
+                                dataLength,
+                                globalPacketIndex,
+                                packetNumInBlock,
+                                FW_UPDATE_DEBUG_EVENT_SESSION_DONE,
+                                FW_UPDATE_DEBUG_STAGE_DONE,
+                                FW_UPDATE_DEBUG_REASON_NONE);
 
             if (state == &masterFwState)
             {
@@ -1732,11 +2043,29 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                     iar_crc32 = storedCrc;
                     if (Set_Update_Flag(state->imageSizeBytes) != HAL_OK)
                     {
+                        FW_RecordDebugEvent(state,
+                                            dstNode,
+                                            msgId,
+                                            dataLength,
+                                            globalPacketIndex,
+                                            packetNumInBlock,
+                                            FW_UPDATE_DEBUG_EVENT_METADATA_FAIL,
+                                            FW_UPDATE_DEBUG_STAGE_ERROR,
+                                            FW_UPDATE_DEBUG_REASON_METADATA_FAILED);
                         CAN_ReportFlashWriteError();
                     }
                 }
                 else
                 {
+                    FW_RecordDebugEvent(state,
+                                        dstNode,
+                                        msgId,
+                                        dataLength,
+                                        globalPacketIndex,
+                                        packetNumInBlock,
+                                        FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                                        FW_UPDATE_DEBUG_STAGE_ERROR,
+                                        FW_UPDATE_DEBUG_REASON_CRC_FAILED);
                     CAN_ReportFlashWriteError();
                 }
             }
@@ -1746,12 +2075,67 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                                             state->imageSizeBytes,
                                             FLASH_UPDATE_FLAG_CLEAR_VALUE) != HAL_OK)
                 {
+                    FW_RecordDebugEvent(state,
+                                        dstNode,
+                                        msgId,
+                                        dataLength,
+                                        globalPacketIndex,
+                                        packetNumInBlock,
+                                        FW_UPDATE_DEBUG_EVENT_METADATA_FAIL,
+                                        FW_UPDATE_DEBUG_STAGE_ERROR,
+                                        FW_UPDATE_DEBUG_REASON_METADATA_FAILED);
                     CAN_ReportFlashWriteError();
                 }
 #if (SLAVE_AUTO_UPDATE_ENABLE != 0u)
                 else
                 {
-                    (void)Slave_RequestAutoConnectedUpdate();
+                    FW_RecordDebugEvent(state,
+                                        dstNode,
+                                        msgId,
+                                        dataLength,
+                                        globalPacketIndex,
+                                        packetNumInBlock,
+                                        FW_UPDATE_DEBUG_EVENT_METADATA_OK,
+                                        FW_UPDATE_DEBUG_STAGE_STORED,
+                                        FW_UPDATE_DEBUG_REASON_NONE);
+
+                    if (Slave_RequestAutoConnectedUpdate())
+                    {
+                        FW_RecordDebugEvent(state,
+                                            dstNode,
+                                            msgId,
+                                            dataLength,
+                                            globalPacketIndex,
+                                            packetNumInBlock,
+                                            FW_UPDATE_DEBUG_EVENT_AUTOSTART_OK,
+                                            FW_UPDATE_DEBUG_STAGE_SLAVE_START,
+                                            FW_UPDATE_DEBUG_REASON_NONE);
+                    }
+                    else
+                    {
+                        FW_RecordDebugEvent(state,
+                                            dstNode,
+                                            msgId,
+                                            dataLength,
+                                            globalPacketIndex,
+                                            packetNumInBlock,
+                                            FW_UPDATE_DEBUG_EVENT_AUTOSTART_FAIL,
+                                            FW_UPDATE_DEBUG_STAGE_ERROR,
+                                            FW_UPDATE_DEBUG_REASON_AUTO_REQUEST_FAILED);
+                    }
+                }
+#else
+                else
+                {
+                    FW_RecordDebugEvent(state,
+                                        dstNode,
+                                        msgId,
+                                        dataLength,
+                                        globalPacketIndex,
+                                        packetNumInBlock,
+                                        FW_UPDATE_DEBUG_EVENT_METADATA_OK,
+                                        FW_UPDATE_DEBUG_STAGE_STORED,
+                                        FW_UPDATE_DEBUG_REASON_NONE);
                 }
 #endif
             }
