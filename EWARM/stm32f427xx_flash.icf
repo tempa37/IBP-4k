@@ -35,13 +35,13 @@ define region FLASH_BOOT_region   = mem:[from 0x08000000 to 0x0803FFFF];
 /* 2. Application 0x0804 0000 - 0x0804 FFFF (64 KB linker window) */
 define region FLASH_APP_region    = mem:[from 0x08040000 to 0x0804FFFF];
 
-/* 3. UNUSED / параметры / логи 0x080C 0000 - 0x0811 FFFF (384 KB) */
-define region FLASH_UNUSED_region = mem:[from 0x080C0000 to 0x0811FFFF];
+/* 3. UNUSED / params / logs 0x080C0000 - 0x0810FFFF */
+define region FLASH_UNUSED_region = mem:[from 0x080C0000 to 0x0810FFFF];
 
-/* 4. myOS 0x0812 0000 - 0x0819 FFFF (128 KB) */
-define region FLASH_MYOS_region   = mem:[from 0x08120000 to 0x0813FFFF];
+/* 4. Firmware staging, sector 16, 0x08110000 - 0x0811FFFF */
+define region FLASH_MYOS_region   = mem:[from 0x08110000 to 0x0811FFFF];
 
-/* 5. slaveOS 0x081A 0000 - 0x081F FFFF (384 KB) */
+/* 5. Reserved area */
 define region FLASH_SLAVEOS_region = mem:[from 0x081A0000 to 0x081BFFFF];
 
 /* Вектор прерываний по-прежнему в начале bootloader */

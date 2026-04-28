@@ -1168,9 +1168,10 @@ static bool FW_IsStoredImageInfoValid(uint8_t imageKind, uint32_t imageSizeBytes
 
     if (imageKind == FW_IMAGE_KIND_SLAVE)
     {
-        return ((imageSizeBytes > 0u) &&
+        return ((imageSizeBytes >= sizeof(uint32_t)) &&
                 (imageSizeBytes < FLASH_APP_SIZE) &&
-                (imageSizeBytes <= FLASH_FW_STORAGE_SIZE));
+                (imageSizeBytes <= FLASH_FW_STORAGE_SIZE) &&
+                (imageSizeBytes <= SLAVE_FLASH_TARGET_SIZE_BYTES));
     }
 
     return false;
@@ -1411,9 +1412,10 @@ static FirmwareUpdateState_t *FW_SelectStateByImageSize(uint32_t imageSizeBytes)
         return &masterFwState;
     }
 
-    if ((imageSizeBytes > 0u) &&
+    if ((imageSizeBytes >= sizeof(uint32_t)) &&
         (imageSizeBytes < FLASH_APP_SIZE) &&
-        (imageSizeBytes <= FLASH_FW_STORAGE_SIZE))
+        (imageSizeBytes <= FLASH_FW_STORAGE_SIZE) &&
+        (imageSizeBytes <= SLAVE_FLASH_TARGET_SIZE_BYTES))
     {
         return &slaveFwState;
     }
@@ -2032,30 +2034,30 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                                 FW_UPDATE_DEBUG_STAGE_DONE,
                                 FW_UPDATE_DEBUG_REASON_NONE);
 
-            if (state == &masterFwState)
-            {
-                crc32 = 0u;
-                iar_crc32 = 0u;
+            crc32 = 0u;
+            iar_crc32 = 0u;
 
-                if (FW_VerifyStoredImageCrc(state, &calculatedCrc, &storedCrc))
-                {
-                    crc32 = calculatedCrc;
-                    iar_crc32 = storedCrc;
-                    if (Set_Update_Flag(state->imageSizeBytes) != HAL_OK)
-                    {
-                        FW_RecordDebugEvent(state,
-                                            dstNode,
-                                            msgId,
-                                            dataLength,
-                                            globalPacketIndex,
-                                            packetNumInBlock,
-                                            FW_UPDATE_DEBUG_EVENT_METADATA_FAIL,
-                                            FW_UPDATE_DEBUG_STAGE_ERROR,
-                                            FW_UPDATE_DEBUG_REASON_METADATA_FAILED);
-                        CAN_ReportFlashWriteError();
-                    }
-                }
-                else
+            if (!FW_VerifyStoredImageCrc(state, &calculatedCrc, &storedCrc))
+            {
+                crc32 = calculatedCrc;
+                iar_crc32 = storedCrc;
+
+                FW_RecordDebugEvent(state,
+                                    dstNode,
+                                    msgId,
+                                    dataLength,
+                                    globalPacketIndex,
+                                    packetNumInBlock,
+                                    FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                                    FW_UPDATE_DEBUG_STAGE_ERROR,
+                                    FW_UPDATE_DEBUG_REASON_CRC_FAILED);
+                CAN_ReportFlashWriteError();
+            }
+            else if (state == &masterFwState)
+            {
+                crc32 = calculatedCrc;
+                iar_crc32 = storedCrc;
+                if (Set_Update_Flag(state->imageSizeBytes) != HAL_OK)
                 {
                     FW_RecordDebugEvent(state,
                                         dstNode,
@@ -2063,14 +2065,16 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                                         dataLength,
                                         globalPacketIndex,
                                         packetNumInBlock,
-                                        FW_UPDATE_DEBUG_EVENT_FLASH_ERROR,
+                                        FW_UPDATE_DEBUG_EVENT_METADATA_FAIL,
                                         FW_UPDATE_DEBUG_STAGE_ERROR,
-                                        FW_UPDATE_DEBUG_REASON_CRC_FAILED);
+                                        FW_UPDATE_DEBUG_REASON_METADATA_FAILED);
                     CAN_ReportFlashWriteError();
                 }
             }
             else if (state == &slaveFwState)
             {
+                crc32 = calculatedCrc;
+                iar_crc32 = storedCrc;
                 if (FW_WriteStoredImageInfo(FW_IMAGE_KIND_SLAVE,
                                             state->imageSizeBytes,
                                             FLASH_UPDATE_FLAG_CLEAR_VALUE) != HAL_OK)

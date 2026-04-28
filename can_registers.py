@@ -36,6 +36,9 @@ FW_BLOCK_SIZE_PACKETS = 10
 FW_PACKET_DATA_SIZE = 6
 FW_BLOCK_SIZE_BYTES = FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE
 IBP4K_MASTER_FW_SIZE = 64 * 1024
+SLAVE_TARGET_FW_SIZE = 32 * 1024
+FW_CRC_TAIL_SIZE = 4
+FW_CRC32_POLY = 0x04C11DB7
 
 CAN_PROTOCOL_ADDR_KOU = 1
 CAN_PROTOCOL_ADDR_IBP4K = 20
@@ -70,6 +73,31 @@ MAX_RETRIES = 3
 DEFAULT_REQUEST_TIMEOUT = 0.75
 DEFAULT_REQUEST_ATTEMPTS = 3
 DEFAULT_REQUEST_PAUSE_MS = 40
+
+
+def firmware_crc32(data: bytes) -> int:
+    crc = 0xFFFFFFFF
+    for value in data:
+        crc ^= value << 24
+        for _ in range(8):
+            if crc & 0x80000000:
+                crc = ((crc << 1) ^ FW_CRC32_POLY) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+    return crc
+
+
+def firmware_has_valid_crc_tail(data: bytes) -> bool:
+    if len(data) < FW_CRC_TAIL_SIZE:
+        return False
+
+    calculated_crc = firmware_crc32(data[:-FW_CRC_TAIL_SIZE])
+    stored_crc = struct.unpack("<I", data[-FW_CRC_TAIL_SIZE:])[0]
+    return calculated_crc == stored_crc
+
+
+def firmware_append_crc_tail(data: bytes) -> bytes:
+    return data + struct.pack("<I", firmware_crc32(data))
 
 ERROR_FLAG_BITS = (
     (0, "BQ_ERROR"),
@@ -408,12 +436,14 @@ class FirmwareUploader:
         slave_num: int = 0,
         src_addr: int = CAN_PROTOCOL_ADDR_KOU,
         dst_addr: int = CAN_PROTOCOL_ADDR_IBP4K,
+        append_crc: bool = False,
     ):
         self.client = client
         self.verbose = verbose
         self.slave_num = slave_num
         self.src_addr = src_addr
         self.dst_addr = dst_addr
+        self.append_crc = append_crc
         self.firmware: Optional[bytes] = None
         self.is_master = False
         self.total_blocks = 0
@@ -446,6 +476,40 @@ class FirmwareUploader:
             return False
 
         detected_is_master = len(self.firmware) == IBP4K_MASTER_FW_SIZE
+        if detected_is_master:
+            if not firmware_has_valid_crc_tail(self.firmware):
+                print(
+                    "Master firmware CRC32 tail is invalid. "
+                    "The receiver will reject this image."
+                )
+                return False
+        else:
+            if len(self.firmware) > SLAVE_TARGET_FW_SIZE:
+                print(
+                    f"Slave firmware is too large: {len(self.firmware)} bytes, "
+                    f"limit is {SLAVE_TARGET_FW_SIZE} bytes including CRC32 tail."
+                )
+                return False
+
+            if not firmware_has_valid_crc_tail(self.firmware):
+                if not self.append_crc:
+                    print(
+                        "Slave firmware has no valid 4-byte little-endian CRC32 tail. "
+                        "Rebuild it with CRC, or pass --append-crc for a raw binary."
+                    )
+                    return False
+
+                if len(self.firmware) + FW_CRC_TAIL_SIZE > SLAVE_TARGET_FW_SIZE:
+                    print(
+                        f"Cannot append CRC32 tail: {len(self.firmware)} + "
+                        f"{FW_CRC_TAIL_SIZE} exceeds {SLAVE_TARGET_FW_SIZE} bytes."
+                    )
+                    return False
+
+                calculated_crc = firmware_crc32(self.firmware)
+                self.firmware = self.firmware + struct.pack("<I", calculated_crc)
+                print(f"Appended slave CRC32 tail: 0x{calculated_crc:08X}")
+
         if is_master != detected_is_master:
             mode = "master" if detected_is_master else "slave"
             print(
@@ -810,6 +874,11 @@ def build_parser() -> argparse.ArgumentParser:
     upload_parser.add_argument("--bitrate", type=int, default=125000, help="CAN bitrate in bps.")
     upload_parser.add_argument("--quiet", action="store_true", help="Minimal upload output.")
     upload_parser.add_argument(
+        "--append-crc",
+        action="store_true",
+        help="Append the receiver-compatible CRC32 tail to a raw slave firmware image.",
+    )
+    upload_parser.add_argument(
         "--src",
         type=int,
         default=CAN_PROTOCOL_ADDR_KOU,
@@ -878,6 +947,7 @@ def run_upload(args: argparse.Namespace) -> int:
             slave_num=args.slave_num,
             src_addr=args.src,
             dst_addr=args.dst,
+            append_crc=args.append_crc,
         )
         if not uploader.load_firmware(args.firmware, is_master=args.master):
             return 1

@@ -104,7 +104,7 @@ extern "C" {
  * считать резервом на будущее.
  */
 #define FLASH_UNUSED_START_ADDR   0x080C0000UL
-#define FLASH_UNUSED_END_ADDR     0x0811FFFFUL
+#define FLASH_UNUSED_END_ADDR     0x0810FFFFUL
 #define FLASH_UNUSED_SIZE         (FLASH_UNUSED_END_ADDR - FLASH_UNUSED_START_ADDR + 1)
 
 /*
@@ -121,11 +121,11 @@ extern "C" {
  * - проще сопровождать и проще диагностировать состояние памяти;
  * - после reset можно восстановить состояние по metadata, а не гадать.
  */
-#define FLASH_FW_STORAGE_START_ADDR      0x08120000UL
-#define FLASH_FW_STORAGE_END_ADDR        0x0813FFFFUL
+#define FLASH_FW_STORAGE_START_ADDR      0x08110000UL
+#define FLASH_FW_STORAGE_END_ADDR        0x0811FFFFUL
 #define FLASH_FW_STORAGE_SIZE            (FLASH_FW_STORAGE_END_ADDR - FLASH_FW_STORAGE_START_ADDR + 1)
-#define FLASH_FW_STORAGE_START_SECTOR    FLASH_SECTOR_17
-#define FLASH_FW_STORAGE_END_SECTOR      FLASH_SECTOR_17
+#define FLASH_FW_STORAGE_START_SECTOR    FLASH_SECTOR_16
+#define FLASH_FW_STORAGE_END_SECTOR      FLASH_SECTOR_16
 #define FLASH_FW_STORAGE_SECTOR_COUNT    1
 
 /*
