@@ -1,4 +1,6 @@
 #include "can.h"
+#include "app_diagnostics.h"
+#include "battery_data.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -6,8 +8,6 @@ CanContext_t canContext = {0};
 uint8_t CanlocalData[8] = {0};
 
 extern CAN_HandleTypeDef hcan1;
-extern ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT];
-extern volatile uint32_t lastProcessedCanError;
 
 static volatile uint16_t canBusOffCounter = 0u;
 static volatile uint16_t wdgResetCounter = 0u;

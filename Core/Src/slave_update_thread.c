@@ -1,5 +1,6 @@
 #include "slave_update_thread.h"
 
+#include "battery_data.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "can.h"
@@ -15,7 +16,7 @@
 #define SLAVE_EXT_ERASE_PAGES_PER_CMD    16u
 #define SLAVE_EXT_ERASE_PAYLOAD_MAX_SIZE (2u + (2u * SLAVE_EXT_ERASE_PAGES_PER_CMD) + 1u)
 
-extern ModbusSlaveData_t modbusSlaveData[UART_CHANNEL_COUNT];
+SlaveSystem_t slave = {0};
 
 typedef enum
 {
@@ -74,6 +75,7 @@ static volatile uint8_t slave_boot_resp_state[UART_CHANNEL_COUNT] = {0};
 volatile SlaveUpdateDebugInfo_t g_slave_update_debug = {0};
 volatile SlaveUpdateTraceEntry_t g_slave_update_trace[SLAVE_UPDATE_TRACE_DEPTH] = {0};
 
+/* Отправляет команду во встроенный bootloader выбранного ведомого контроллера по UART. */
 static bool Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, uint16_t length)
 {
     UartContext_t *ctx;
@@ -104,6 +106,7 @@ static bool Slave_SendBootloaderCommand(uint8_t slave_num, const uint8_t *data, 
     return true;
 }
 
+/* Забирает один ACK/NACK байт bootloader из RAM-состояния ведомого канала. */
 static bool Slave_TakeBootloaderResponse(uint8_t slave_num, uint8_t *response)
 {
     uint8_t value;
@@ -124,6 +127,7 @@ static bool Slave_TakeBootloaderResponse(uint8_t slave_num, uint8_t *response)
     return true;
 }
 
+/* Анализирует Modbus-кадр на предмет ответа на команду входа ведомого контроллера в bootloader. */
 void Slave_OnModbusFrameReceived(uint8_t slave_num, const uint8_t *frame, size_t length)
 {
     uint16_t crc_expected;
@@ -160,6 +164,7 @@ void Slave_OnModbusFrameReceived(uint8_t slave_num, const uint8_t *frame, size_t
     }
 }
 
+/* Возвращает битовую маску для номера ведомого канала. */
 static uint8_t Slave_GetChannelBit(uint8_t slave_num)
 {
     if (slave_num >= UART_CHANNEL_COUNT)
@@ -170,6 +175,7 @@ static uint8_t Slave_GetChannelBit(uint8_t slave_num)
     return (uint8_t)(1u << slave_num);
 }
 
+/* Собирает маску ведомых каналов, по которым сейчас есть валидная Modbus-связь. */
 static uint8_t Slave_GetConnectedMask(void)
 {
     uint8_t mask = 0u;
@@ -185,6 +191,7 @@ static uint8_t Slave_GetConnectedMask(void)
     return mask;
 }
 
+/* Проверяет, что во flash сохранен пригодный slave-образ для рассылки ведомым контроллерам. */
 static bool Slave_HasStoredImageReady(void)
 {
     return (slave.os_in_flash != 0u) &&
@@ -193,6 +200,7 @@ static bool Slave_HasStoredImageReady(void)
            (slave.os_size_bytes <= SLAVE_FLASH_TARGET_SIZE_BYTES);
 }
 
+/* Копирует короткий отладочный текст в volatile-буфер без выхода за границы. */
 static void Slave_CopyDebugText(volatile char *destination,
                                 const char *source,
                                 uint16_t destination_size)
@@ -225,6 +233,7 @@ static void Slave_CopyDebugText(volatile char *destination,
     destination[index] = '\0';
 }
 
+/* Возвращает текстовое имя фазы автомата прошивки для отладки. */
 static const char *Slave_GetPhaseText(SlaveUpdatePhase_t phase)
 {
     switch (phase)
@@ -256,6 +265,7 @@ static const char *Slave_GetPhaseText(SlaveUpdatePhase_t phase)
     }
 }
 
+/* Возвращает текстовое описание причины события или отказа прошивки. */
 static const char *Slave_GetReasonText(uint8_t reason)
 {
     switch (reason)
@@ -279,6 +289,7 @@ static const char *Slave_GetReasonText(uint8_t reason)
     }
 }
 
+/* Очищает сохраненный снимок последней ошибки прошивки ведомого контроллера. */
 static void Slave_ClearFailureSnapshot(void)
 {
     g_slave_update_debug.fail_valid = 0u;
@@ -305,6 +316,7 @@ static void Slave_ClearFailureSnapshot(void)
     Slave_CopyDebugText(g_slave_update_debug.fail_detail_text, "NONE", SLAVE_UPDATE_DEBUG_TEXT_SIZE);
 }
 
+/* Фиксирует подробный снимок отказа до очистки рабочего контекста канала. */
 static void Slave_SaveFailureSnapshot(uint8_t slave_num,
                                       SlaveUpdatePhase_t failed_phase,
                                       uint8_t terminal_reason,
@@ -349,6 +361,7 @@ static void Slave_SaveFailureSnapshot(uint8_t slave_num,
                         SLAVE_UPDATE_DEBUG_TEXT_SIZE);
 }
 
+/* Сбрасывает batch-состояние очереди прошивки ведомых каналов. */
 static void Slave_ResetBatchState(void)
 {
     slave_update_pending_mask = 0u;
@@ -358,6 +371,7 @@ static void Slave_ResetBatchState(void)
     Slave_ClearFailureSnapshot();
 }
 
+/* Обновляет живой отладочный снимок текущего состояния автомата прошивки. */
 static void Slave_UpdateDebugSnapshot(uint32_t current_tick)
 {
     const SlaveUpdateContext_t *ctx = NULL;
@@ -400,6 +414,7 @@ static void Slave_UpdateDebugSnapshot(uint32_t current_tick)
     g_slave_update_debug.live_padded_size = (ctx != NULL) ? ctx->padded_size : 0u;
 }
 
+/* Записывает одно событие автомата прошивки в debug-поля и кольцевую трассу. */
 static void Slave_RecordDebugEvent(uint8_t slave_num,
                                    uint8_t event_code,
                                    SlaveUpdatePhase_t phase,
@@ -446,6 +461,7 @@ static void Slave_RecordDebugEvent(uint8_t slave_num,
     Slave_UpdateDebugSnapshot(current_tick);
 }
 
+/* Записывает событие перехода фазы для конкретного рабочего контекста. */
 static void Slave_RecordPhaseTrace(const SlaveUpdateContext_t *ctx, uint32_t current_tick)
 {
     if (ctx == NULL)
@@ -462,6 +478,7 @@ static void Slave_RecordPhaseTrace(const SlaveUpdateContext_t *ctx, uint32_t cur
                            current_tick);
 }
 
+/* Завершает активную прошивку канала и переносит результат в маски success/error. */
 static void Slave_FinishActiveUpdate(uint8_t slave_num, bool success)
 {
     uint8_t channel_bit = Slave_GetChannelBit(slave_num);
@@ -486,11 +503,13 @@ static void Slave_FinishActiveUpdate(uint8_t slave_num, bool success)
     }
 }
 
+/* Помечает набор каналов как завершившийся ошибкой без запуска передачи. */
 static void Slave_MarkMaskedChannelsAsError(uint8_t mask)
 {
     slave_update_error_mask |= mask;
 }
 
+/* Выбирает следующий ожидающий канал и подготавливает его к запуску прошивки. */
 static void Slave_StartNextPendingUpdate(void)
 {
     if (!Slave_HasStoredImageReady())
@@ -558,6 +577,7 @@ static void Slave_StartNextPendingUpdate(void)
     Slave_UpdateDebugSnapshot(HAL_GetTick());
 }
 
+/* Валидирует маску запроса и ставит выбранные ведомые каналы в очередь прошивки. */
 static bool Slave_RequestUpdateMask(uint8_t request_mask)
 {
     if ((SLAVE_FW_SEND_ENABLE == 0u) || !Slave_HasStoredImageReady())
@@ -616,6 +636,7 @@ static bool Slave_RequestUpdateMask(uint8_t request_mask)
     return true;
 }
 
+/* Проверяет, является ли фаза ожиданием ACK от системного bootloader. */
 static bool Slave_IsAckWaitPhase(SlaveUpdatePhase_t phase)
 {
     switch (phase)
@@ -635,6 +656,7 @@ static bool Slave_IsAckWaitPhase(SlaveUpdatePhase_t phase)
     }
 }
 
+/* Возвращает таймаут ожидания для текущей фазы автомата прошивки. */
 static uint32_t Slave_GetPhaseTimeoutMs(SlaveUpdatePhase_t phase)
 {
     if (phase == SLAVE_UPD_WAIT_ACK_EXT_ERASE_PAYLOAD)
@@ -645,6 +667,7 @@ static uint32_t Slave_GetPhaseTimeoutMs(SlaveUpdatePhase_t phase)
     return SLAVE_UPDATE_TIMEOUT_MS;
 }
 
+/* Определяет фазу, с которой нужно повторить команду после NACK или timeout. */
 static SlaveUpdatePhase_t Slave_GetRetryPhase(SlaveUpdatePhase_t phase)
 {
     switch (phase)
@@ -686,6 +709,7 @@ static SlaveUpdatePhase_t Slave_GetRetryPhase(SlaveUpdatePhase_t phase)
     }
 }
 
+/* Планирует повтор команды или переводит канал в ошибку при исчерпании попыток. */
 static void Slave_ScheduleRetryOrError(SlaveUpdateContext_t *ctx,
                                        uint8_t reason,
                                        uint32_t current_tick)
@@ -733,6 +757,7 @@ static void Slave_ScheduleRetryOrError(SlaveUpdateContext_t *ctx,
     }
 }
 
+/* Готовит следующий блок данных slave-образа для команды Write Memory. */
 static bool Slave_PrepareNextDataBlock(SlaveUpdateContext_t *ctx)
 {
     uint32_t bytes_remaining;
@@ -761,6 +786,7 @@ static bool Slave_PrepareNextDataBlock(SlaveUpdateContext_t *ctx)
     return true;
 }
 
+/* Формирует payload команды Extended Erase для очередного блока flash-страниц. */
 static bool Slave_PrepareExtErasePayload(SlaveUpdateContext_t *ctx,
                                          uint8_t *payload,
                                          uint16_t payload_capacity,
@@ -826,6 +852,7 @@ static bool Slave_PrepareExtErasePayload(SlaveUpdateContext_t *ctx,
     return true;
 }
 
+/* Отменяет все ожидающие и активные прошивки ведомых контроллеров. */
 void Slave_CancelPendingUpdates(void)
 {
     Slave_RecordDebugEvent(slave_update_active_slave,
@@ -852,6 +879,7 @@ void Slave_CancelPendingUpdates(void)
     taskEXIT_CRITICAL();
 }
 
+/* Проверяет, выполняется ли сейчас хотя бы одна slave-прошивка или есть очередь. */
 bool Slave_IsAnyUpdateRunning(void)
 {
     if ((slave_update_pending_mask != 0u) ||
@@ -872,17 +900,20 @@ bool Slave_IsAnyUpdateRunning(void)
     return false;
 }
 
+/* Запрашивает прошивку одного конкретного ведомого канала. */
 bool Slave_RequestSingleUpdate(uint8_t slave_num)
 {
     uint8_t request_mask = Slave_GetChannelBit(slave_num);
     return Slave_RequestUpdateMask(request_mask);
 }
 
+/* Запрашивает прошивку всех сейчас подключенных ведомых каналов. */
 bool Slave_RequestConnectedUpdate(void)
 {
     return Slave_RequestUpdateMask(0xFFu);
 }
 
+/* Ставит автоматический запуск прошивки подключенных каналов после завершения приема образа. */
 bool Slave_RequestAutoConnectedUpdate(void)
 {
     if ((SLAVE_FW_SEND_ENABLE == 0u) || !Slave_HasStoredImageReady())
@@ -914,6 +945,7 @@ bool Slave_RequestAutoConnectedUpdate(void)
     return true;
 }
 
+/* Проверяет, занят ли конкретный ведомый канал процессом прошивки. */
 bool Slave_IsUpdateActive(uint8_t slave_num)
 {
     if (slave_num >= UART_CHANNEL_COUNT)
@@ -925,6 +957,7 @@ bool Slave_IsUpdateActive(uint8_t slave_num)
            (slave_update_ctx[slave_num].phase != SLAVE_UPD_IDLE);
 }
 
+/* Выполняет один шаг автомата фоновой прошивки ведомых контроллеров. */
 void Slave_UpdateProcess(void)
 {
     uint32_t current_tick = HAL_GetTick();
@@ -1734,4 +1767,16 @@ void Slave_UpdateProcess(void)
     }
 
     Slave_UpdateDebugSnapshot(current_tick);
+}
+
+/* Основная задача FreeRTOS для фоновой прошивки ведомых контроллеров. */
+void Slave_UpdateTask(void const *argument)
+{
+    (void)argument;
+
+    for (;;)
+    {
+        Slave_UpdateProcess();
+        osDelay(50);
+    }
 }

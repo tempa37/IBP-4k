@@ -162,6 +162,7 @@ extern volatile SlaveUpdateDebugInfo_t g_slave_update_debug;
 extern volatile SlaveUpdateTraceEntry_t g_slave_update_trace[SLAVE_UPDATE_TRACE_DEPTH];
 
 void Slave_UpdateProcess(void);
+void Slave_UpdateTask(void const *argument);
 bool Slave_IsUpdateActive(uint8_t slave_num);
 bool Slave_IsAnyUpdateRunning(void);
 bool Slave_RequestSingleUpdate(uint8_t slave_num);

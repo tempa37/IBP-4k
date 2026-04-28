@@ -61,9 +61,11 @@ extern volatile uint8_t uart_debug_error_uart;
 
 /* Функции UART */
 void UART_Init(void);
+void UART_CreateMutexes(void);
 void UART_StartAllReceptions(void);
 UartContext_t *Uart_GetContext(UART_HandleTypeDef *handle);
 void Uart_StartReception(UartContext_t *context);
+void Uart_CheckAndRecover(UartContext_t *ctx);
 void Uart_ErrorRecovery(void);
 
 /* Инициализация UART */

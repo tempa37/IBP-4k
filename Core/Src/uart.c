@@ -17,6 +17,11 @@ volatile uint32_t uart_debug_error_dr = 0u;
 volatile uint32_t uart_debug_error_count = 0u;
 volatile uint8_t uart_debug_error_uart = 0xFFu;
 
+osMutexDef(UART4BufferMutex);
+osMutexDef(UART5BufferMutex);
+osMutexDef(UART7BufferMutex);
+osMutexDef(UART8BufferMutex);
+
 
 /* Конфигурация UART */
 uint8_t swap_crc = 0;
@@ -43,6 +48,34 @@ void UART_Init(void)
     uartContexts[UART_CHANNEL_7].handle = &huart7;
     uartContexts[UART_CHANNEL_4].handle = &huart4;
     uartContexts[UART_CHANNEL_5].handle = &huart5;
+}
+
+/* Создает mutex-ы для синхронизации обмена по каждому UART-каналу. */
+void UART_CreateMutexes(void)
+{
+    uartContexts[UART_CHANNEL_4].mutex = osMutexCreate(osMutex(UART4BufferMutex));
+    if (uartContexts[UART_CHANNEL_4].mutex == NULL)
+    {
+        Error_Handler();
+    }
+
+    uartContexts[UART_CHANNEL_5].mutex = osMutexCreate(osMutex(UART5BufferMutex));
+    if (uartContexts[UART_CHANNEL_5].mutex == NULL)
+    {
+        Error_Handler();
+    }
+
+    uartContexts[UART_CHANNEL_7].mutex = osMutexCreate(osMutex(UART7BufferMutex));
+    if (uartContexts[UART_CHANNEL_7].mutex == NULL)
+    {
+        Error_Handler();
+    }
+
+    uartContexts[UART_CHANNEL_8].mutex = osMutexCreate(osMutex(UART8BufferMutex));
+    if (uartContexts[UART_CHANNEL_8].mutex == NULL)
+    {
+        Error_Handler();
+    }
 }
 
 /**
@@ -189,7 +222,7 @@ void Uart_CheckAndRecover(UartContext_t *ctx)
 
 
 /**
- * @brief UART4 Initialization Function
+ * @brief Инициализирует UART4 с общей конфигурацией обмена батарейного канала.
  */
 void MX_UART4_Init(void)
 {
@@ -210,7 +243,7 @@ void MX_UART4_Init(void)
 }
 
 /**
- * @brief UART5 Initialization Function
+ * @brief Инициализирует UART5 с общей конфигурацией обмена батарейного канала.
  */
 void MX_UART5_Init(void)
 {
@@ -231,7 +264,7 @@ void MX_UART5_Init(void)
 }
 
 /**
- * @brief UART7 Initialization Function
+ * @brief Инициализирует UART7 с общей конфигурацией обмена батарейного канала.
  */
 void MX_UART7_Init(void)
 {
@@ -252,7 +285,7 @@ void MX_UART7_Init(void)
 }
 
 /**
- * @brief UART8 Initialization Function
+ * @brief Инициализирует UART8 с общей конфигурацией обмена батарейного канала.
  */
 void MX_UART8_Init(void)
 {

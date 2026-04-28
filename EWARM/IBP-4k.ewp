@@ -1149,10 +1149,55 @@
             <group>
                 <name>Core</name>
                 <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\app_config.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\app_diagnostics.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\app_diagnostics.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\battery_data.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\battery_data.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\battery_modbus.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\battery_modbus.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\board_io.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\board_io.h</name>
+                </file>
+                <file>
                     <name>$PROJ_DIR$\..\Core\Src\can.c</name>
                 </file>
                 <file>
                     <name>$PROJ_DIR$\..\Core\Inc\can.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\can_service.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\can_service.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\firmware_update.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\firmware_update.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\flash_storage.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\flash_storage.h</name>
                 </file>
                 <file>
                     <name>$PROJ_DIR$\..\Core\Src\freertos.c</name>
@@ -1168,6 +1213,12 @@
                 </file>
                 <file>
                     <name>$PROJ_DIR$\..\Core\Inc\slave_update_thread.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Src\supervision.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\supervision.h</name>
                 </file>
                 <file>
                     <name>$PROJ_DIR$\..\Core\Src\stm32f4xx_hal_msp.c</name>
