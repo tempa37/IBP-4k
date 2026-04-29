@@ -10,9 +10,6 @@
 #include <string.h>
 
 #define SLAVE_UPDATE_INVALID_INDEX  0xFFu
-#define SLAVE_BOOT_RESP_NONE        0u
-#define SLAVE_BOOT_RESP_OK          1u
-#define SLAVE_BOOT_RESP_INVALID     2u
 #define SLAVE_EXT_ERASE_PAGES_PER_CMD    16u
 #define SLAVE_EXT_ERASE_PAYLOAD_MAX_SIZE (2u + (2u * SLAVE_EXT_ERASE_PAGES_PER_CMD) + 1u)
 
@@ -56,7 +53,6 @@ typedef struct
     uint32_t total_bytes;
     uint8_t retry_count;
     uint32_t last_command_tick;
-    uint8_t boot_resp_received;
     uint16_t erase_next_page;
     uint16_t erase_last_page;
     uint16_t erase_pages_in_block;
@@ -71,7 +67,6 @@ static volatile uint8_t slave_update_success_mask = 0u;
 static volatile uint8_t slave_update_error_mask = 0u;
 static volatile uint8_t slave_update_active_slave = SLAVE_UPDATE_INVALID_INDEX;
 static volatile uint8_t slave_update_auto_pending = 0u;
-static volatile uint8_t slave_boot_resp_state[UART_CHANNEL_COUNT] = {0};
 volatile SlaveUpdateDebugInfo_t g_slave_update_debug = {0};
 volatile SlaveUpdateTraceEntry_t g_slave_update_trace[SLAVE_UPDATE_TRACE_DEPTH] = {0};
 
@@ -125,43 +120,6 @@ static bool Slave_TakeBootloaderResponse(uint8_t slave_num, uint8_t *response)
     slave.device[slave_num].ack = 0u;
     *response = value;
     return true;
-}
-
-/* Анализирует Modbus-кадр на предмет ответа на команду входа ведомого контроллера в bootloader. */
-void Slave_OnModbusFrameReceived(uint8_t slave_num, const uint8_t *frame, size_t length)
-{
-    uint16_t crc_expected;
-    uint16_t crc_received;
-
-    if ((slave_num >= UART_CHANNEL_COUNT) || (frame == NULL) || (length < 2u))
-    {
-        return;
-    }
-
-    if (frame[0] != MODBUS_DEFAULT_SLAVE_ADDRESS)
-    {
-        return;
-    }
-
-    if ((length >= 8u) &&
-        (frame[1] == MODBUS_FUNC_WRITE_SINGLE_REG) &&
-        (frame[2] == 0x00u) &&
-        (frame[3] == 0x00u) &&
-        (frame[4] == 0x12u) &&
-        (frame[5] == 0x34u))
-    {
-        crc_expected = Modbus_CalculateCRC(frame, 6u);
-        crc_received = (uint16_t)frame[6] | ((uint16_t)frame[7] << 8);
-        slave_boot_resp_state[slave_num] = (crc_expected == crc_received)
-                                          ? SLAVE_BOOT_RESP_OK
-                                          : SLAVE_BOOT_RESP_INVALID;
-        return;
-    }
-
-    if (((frame[1] & 0x7Fu) == MODBUS_FUNC_WRITE_SINGLE_REG) && (length >= 5u))
-    {
-        slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_INVALID;
-    }
 }
 
 /* Возвращает битовую маску для номера ведомого канала. */
@@ -869,7 +827,6 @@ void Slave_CancelPendingUpdates(void)
     {
         slave.device[slave_num].need_update = 0u;
         slave.device[slave_num].ack = 0u;
-        slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
         memset(&slave_update_ctx[slave_num], 0, sizeof(slave_update_ctx[slave_num]));
     }
 
@@ -1061,8 +1018,6 @@ void Slave_UpdateProcess(void)
                 crc = Modbus_CalculateCRC(modbus_cmd, 6u);
                 modbus_cmd[6] = (uint8_t)(crc & 0xFFu);
                 modbus_cmd[7] = (uint8_t)((crc >> 8) & 0xFFu);
-                slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
-                ctx->boot_resp_received = 0u;
 
                 if (Slave_SendBootloaderCommand(slave_num, modbus_cmd, sizeof(modbus_cmd)))
                 {
@@ -1093,62 +1048,12 @@ void Slave_UpdateProcess(void)
             }
 
             case SLAVE_UPD_WAIT_BOOTLOADER_ENTRY:
-            {
-                uint8_t boot_resp_state = slave_boot_resp_state[slave_num];
-
-                if ((ctx->boot_resp_received == 0u) && (boot_resp_state == SLAVE_BOOT_RESP_OK))
-                {
-                    ctx->boot_resp_received = 1u;
-                    ctx->retry_count = 0u;
-                    slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
-                    Slave_RecordDebugEvent(slave_num,
-                                           SLAVE_UPDATE_DEBUG_EVENT_BOOT_RESP,
-                                           ctx->phase,
-                                           SLAVE_UPDATE_DEBUG_REASON_NONE,
-                                           MODBUS_FUNC_WRITE_SINGLE_REG,
-                                           ctx,
-                                           current_tick);
-                }
-                else if (boot_resp_state == SLAVE_BOOT_RESP_INVALID)
-                {
-                    slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
-                    Slave_RecordDebugEvent(slave_num,
-                                           SLAVE_UPDATE_DEBUG_EVENT_BOOT_RESP,
-                                           ctx->phase,
-                                           SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_INVALID,
-                                           0u,
-                                           ctx,
-                                           current_tick);
-                    Slave_ScheduleRetryOrError(ctx,
-                                               SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_INVALID,
-                                               current_tick);
-                    break;
-                }
-
-                if ((ctx->boot_resp_received == 0u) &&
-                    ((current_tick - ctx->last_command_tick) > SLAVE_BOOTLOADER_RESP_TIMEOUT_MS))
-                {
-                    Slave_RecordDebugEvent(slave_num,
-                                           SLAVE_UPDATE_DEBUG_EVENT_TIMEOUT,
-                                           ctx->phase,
-                                           SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_TIMEOUT,
-                                           0u,
-                                           ctx,
-                                           current_tick);
-                    Slave_ScheduleRetryOrError(ctx,
-                                               SLAVE_UPDATE_DEBUG_REASON_BOOT_RESP_TIMEOUT,
-                                               current_tick);
-                    break;
-                }
-
-                if (ctx->boot_resp_received != 0u &&
-                    ((current_tick - ctx->last_command_tick) >= SLAVE_BOOTLOADER_ENTRY_DELAY_MS))
+                if ((current_tick - ctx->last_command_tick) >= SLAVE_BOOTLOADER_ENTRY_DELAY_MS)
                 {
                     ctx->phase = SLAVE_UPD_SEND_SYNC;
                     Slave_RecordPhaseTrace(ctx, current_tick);
                 }
                 break;
-            }
 
             case SLAVE_UPD_SEND_SYNC:
             {
@@ -1709,7 +1614,6 @@ void Slave_UpdateProcess(void)
                                        current_tick);
                 slave.device[slave_num].need_update = 0u;
                 slave.device[slave_num].ack = 0u;
-                slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
                 memset(ctx, 0, sizeof(*ctx));
                 break;
 
@@ -1755,7 +1659,6 @@ void Slave_UpdateProcess(void)
                                        current_tick);
                 slave.device[slave_num].need_update = 0u;
                 slave.device[slave_num].ack = 0u;
-                slave_boot_resp_state[slave_num] = SLAVE_BOOT_RESP_NONE;
                 memset(ctx, 0, sizeof(*ctx));
                 break;
             }

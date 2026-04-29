@@ -81,7 +81,6 @@ static void BatteryModbus_HandleFrame(uint8_t channelIndex,
         return;
     }
 
-    Slave_OnModbusFrameReceived(channelIndex, localBuffer, length);
     (void)Modbus_SaveResponse(modbusBuffer, localBuffer, length);
 
     if (!ParseModbusResponse(localBuffer, length, &modbusSlaveData[channelIndex]))

@@ -18,8 +18,7 @@ extern "C" {
 #define SLAVE_FW_BLOCK_SIZE               256u
 #define SLAVE_FW_SEND_ENABLE              1u
 #define SLAVE_AUTO_UPDATE_ENABLE          1u
-#define SLAVE_BOOTLOADER_ENTRY_DELAY_MS   5000u
-#define SLAVE_BOOTLOADER_RESP_TIMEOUT_MS  1500u
+#define SLAVE_BOOTLOADER_ENTRY_DELAY_MS   3500u
 
 /*
  * Профиль прошиваемого slave: ST STM32L051C6.
@@ -169,7 +168,6 @@ bool Slave_RequestSingleUpdate(uint8_t slave_num);
 bool Slave_RequestConnectedUpdate(void);
 bool Slave_RequestAutoConnectedUpdate(void);
 void Slave_CancelPendingUpdates(void);
-void Slave_OnModbusFrameReceived(uint8_t slave_num, const uint8_t *frame, size_t length);
 
 #ifdef __cplusplus
 }
