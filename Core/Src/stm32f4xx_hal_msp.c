@@ -117,6 +117,12 @@ void HAL_CAN_MspInit(CAN_HandleTypeDef* hcan)
     HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);
 
+    HAL_NVIC_SetPriority(CAN1_TX_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(CAN1_TX_IRQn);
+
+    HAL_NVIC_SetPriority(CAN1_SCE_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(CAN1_SCE_IRQn);
+
 
   }
 
@@ -179,6 +185,8 @@ void HAL_CAN_MspDeInit(CAN_HandleTypeDef* hcan)
     /* USER CODE BEGIN CAN1_MspDeInit 1 */
     /* Отключение прерывания CAN FIFO0 */
     HAL_NVIC_DisableIRQ(CAN1_RX0_IRQn);
+    HAL_NVIC_DisableIRQ(CAN1_TX_IRQn);
+    HAL_NVIC_DisableIRQ(CAN1_SCE_IRQn);
     /* USER CODE END CAN1_MspDeInit 1 */
   }
 

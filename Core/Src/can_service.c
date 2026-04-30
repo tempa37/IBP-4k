@@ -59,6 +59,7 @@ void CanService_Task(void const *argument)
     {
 #if CAN_ENABLE == 1
         CanService_HandleErrorState();
+        CAN_ProcessPendingDiagnosticLog();
 
         while (CAN_DequeueReceivedFrame(&localHeader, CanlocalData, &dataLength))
         {

@@ -45,6 +45,7 @@ void BAT_SetIndicator(uint8_t battery)
     {
         return;
     }
+    
 
     if (modbusSlaveData[battery].valid)
     {

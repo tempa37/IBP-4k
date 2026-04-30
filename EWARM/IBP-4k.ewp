@@ -1188,6 +1188,12 @@
                     <name>$PROJ_DIR$\..\Core\Inc\can_service.h</name>
                 </file>
                 <file>
+                    <name>$PROJ_DIR$\..\Core\Src\diagnostic_log.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\Core\Inc\diagnostic_log.h</name>
+                </file>
+                <file>
                     <name>$PROJ_DIR$\..\Core\Src\firmware_update.c</name>
                 </file>
                 <file>

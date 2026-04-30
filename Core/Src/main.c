@@ -158,7 +158,15 @@ int main(void)
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
+  /*
+    static uint8_t test_logged = 0u;
 
+    if (test_logged == 0u)
+    {
+        test_logged = 1u;
+        CAN_ReportFlashWriteError();
+    }
+*/
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
   osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 1280); //1280

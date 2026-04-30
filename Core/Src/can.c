@@ -1,6 +1,7 @@
 #include "can.h"
 #include "app_diagnostics.h"
 #include "battery_data.h"
+#include "diagnostic_log.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -13,6 +14,22 @@ extern CAN_HandleTypeDef hcan1;
 static volatile uint16_t wdgResetCounter = 0u;
 static volatile uint16_t lastErrorTimestampHours = 0u;
 static volatile uint8_t lastErrorCode = 0u;
+
+typedef struct
+{
+    volatile bool pending;
+    volatile uint8_t errorCode;
+    volatile uint8_t eventType;
+    volatile uint8_t channel;
+    volatile uint8_t source;
+    volatile uint16_t timestampHours;
+    volatile uint16_t canBusOffCounter;
+    volatile uint16_t wdgCounter;
+    volatile uint32_t flags;
+    volatile uint32_t detail;
+} CanPendingDiagnosticLog_t;
+
+static CanPendingDiagnosticLog_t pendingDiagnosticLog = {0};
 
 osMutexDef(CANBufferMutex);
 
@@ -98,6 +115,29 @@ static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
 }
 
 static void CAN_RecordErrorCode(uint8_t errorCodeValue);
+static void CAN_LoadPersistentDiagnostics(void);
+static HAL_StatusTypeDef CAN_WriteDiagnosticLogEvent(uint8_t errorCode,
+                                                     uint8_t eventType,
+                                                     uint8_t channel,
+                                                     uint8_t source,
+                                                     uint32_t flags,
+                                                     uint32_t detail);
+static HAL_StatusTypeDef CAN_WriteDiagnosticLogEventSnapshot(uint8_t errorCode,
+                                                             uint8_t eventType,
+                                                             uint8_t channel,
+                                                             uint8_t source,
+                                                             uint32_t flags,
+                                                             uint32_t detail,
+                                                             uint16_t timestampHours,
+                                                             uint16_t canBusOffCounter,
+                                                             uint16_t watchdogCounter);
+static void CAN_CheckLastDiagnosticLogRecord(uint8_t sourceErrorCode);
+static void CAN_QueueDiagnosticLogEvent(uint8_t errorCode,
+                                        uint8_t eventType,
+                                        uint8_t channel,
+                                        uint8_t source,
+                                        uint32_t flags,
+                                        uint32_t detail);
 static uint32_t CAN_BuildErrorLogFlags(uint32_t halError);
 static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags);
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData);
@@ -105,21 +145,34 @@ static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uin
 static void CAN_RecordStartupResetFlags(void)
 {
     bool watchdogResetDetected = false;
+    uint32_t resetDetail = 0u;
 
     if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET)
     {
         watchdogResetDetected = true;
+        resetDetail |= 0x01u;
     }
 
     if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) != RESET)
     {
         watchdogResetDetected = true;
+        resetDetail |= 0x02u;
     }
 
     if (watchdogResetDetected)
     {
-        ++wdgResetCounter;
-        CAN_RecordErrorCode(0x02u);
+        if (wdgResetCounter < 0xFFFFu)
+        {
+            ++wdgResetCounter;
+        }
+
+        CAN_RecordErrorCode(DIAG_LOG_ERROR_WDG_RESET);
+        (void)CAN_WriteDiagnosticLogEvent(DIAG_LOG_ERROR_WDG_RESET,
+                                          DIAG_LOG_EVENT_ERROR,
+                                          DIAG_LOG_CHANNEL_GLOBAL,
+                                          DIAG_LOG_SOURCE_WDG,
+                                          0u,
+                                          resetDetail);
     }
 
     __HAL_RCC_CLEAR_RESET_FLAGS();
@@ -129,6 +182,121 @@ static void CAN_RecordErrorCode(uint8_t errorCodeValue)
 {
     lastErrorCode = errorCodeValue;
     lastErrorTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
+}
+
+static HAL_StatusTypeDef CAN_WriteDiagnosticLogEvent(uint8_t errorCode,
+                                                     uint8_t eventType,
+                                                     uint8_t channel,
+                                                     uint8_t source,
+                                                     uint32_t flags,
+                                                     uint32_t detail)
+{
+    return CAN_WriteDiagnosticLogEventSnapshot(errorCode,
+                                               eventType,
+                                               channel,
+                                               source,
+                                               flags,
+                                               detail,
+                                               lastErrorTimestampHours,
+                                               canErrorLog.busOffCounter,
+                                               wdgResetCounter);
+}
+
+static HAL_StatusTypeDef CAN_WriteDiagnosticLogEventSnapshot(uint8_t errorCode,
+                                                             uint8_t eventType,
+                                                             uint8_t channel,
+                                                             uint8_t source,
+                                                             uint32_t flags,
+                                                             uint32_t detail,
+                                                             uint16_t timestampHours,
+                                                             uint16_t canBusOffCounter,
+                                                             uint16_t watchdogCounter)
+{
+    HAL_StatusTypeDef status;
+
+    status = DiagnosticLog_RecordEvent(errorCode,
+                                       eventType,
+                                       channel,
+                                       source,
+                                       flags,
+                                       detail,
+                                       timestampHours,
+                                       canBusOffCounter,
+                                       watchdogCounter);
+    if (status == HAL_OK)
+    {
+        CAN_CheckLastDiagnosticLogRecord(errorCode);
+    }
+
+    return status;
+}
+
+static void CAN_CheckLastDiagnosticLogRecord(uint8_t sourceErrorCode)
+{
+    HAL_StatusTypeDef status;
+
+    if (DiagnosticLog_CheckLastRecordCrc())
+    {
+        return;
+    }
+
+    CAN_RecordErrorCode(DIAG_LOG_ERROR_FLASH_CRC);
+
+    if (sourceErrorCode == DIAG_LOG_ERROR_FLASH_CRC)
+    {
+        return;
+    }
+
+    status = DiagnosticLog_RecordEvent(DIAG_LOG_ERROR_FLASH_CRC,
+                                       DIAG_LOG_EVENT_ERROR,
+                                       DIAG_LOG_CHANNEL_GLOBAL,
+                                       DIAG_LOG_SOURCE_FLASH,
+                                       0u,
+                                       0x43524332UL,
+                                       lastErrorTimestampHours,
+                                       canErrorLog.busOffCounter,
+                                       wdgResetCounter);
+    if (status == HAL_OK)
+    {
+        (void)DiagnosticLog_CheckLastRecordCrc();
+    }
+}
+
+static void CAN_QueueDiagnosticLogEvent(uint8_t errorCode,
+                                        uint8_t eventType,
+                                        uint8_t channel,
+                                        uint8_t source,
+                                        uint32_t flags,
+                                        uint32_t detail)
+{
+    /*
+     * Эта функция может вызываться из CAN IRQ. Поэтому здесь только копия
+     * короткого снимка в RAM; физическая запись Flash выполняется позже из
+     * CanService_Task(), где уже можно безопасно блокироваться на erase/program.
+     */
+    pendingDiagnosticLog.errorCode = errorCode;
+    pendingDiagnosticLog.eventType = eventType;
+    pendingDiagnosticLog.channel = channel;
+    pendingDiagnosticLog.source = source;
+    pendingDiagnosticLog.timestampHours = lastErrorTimestampHours;
+    pendingDiagnosticLog.canBusOffCounter = canErrorLog.busOffCounter;
+    pendingDiagnosticLog.wdgCounter = wdgResetCounter;
+    pendingDiagnosticLog.flags = flags;
+    pendingDiagnosticLog.detail = detail;
+    pendingDiagnosticLog.pending = true;
+}
+
+static void CAN_LoadPersistentDiagnostics(void)
+{
+    DiagnosticLogCounters_t counters = {0};
+
+    DiagnosticLog_Init();
+    DiagnosticLog_GetCounters(&counters);
+
+    canErrorLog.busOffCounter = counters.can_busoff_counter;
+    wdgResetCounter = counters.wdg_reset_counter;
+    lastErrorTimestampHours = counters.last_error_timestamp_hours;
+    lastErrorCode = counters.last_error_code;
 }
 
 static uint32_t CAN_BuildErrorLogFlags(uint32_t halError)
@@ -241,6 +409,8 @@ static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
     canErrorLog.lastHalError = halError;
     canErrorLog.lastTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
 
+    flags = CAN_ERROR_LOG_FLAG_BUS_OFF;
+    
     if (canErrorLog.eventCounter < 0xFFFFFFFFu)
     {
         ++canErrorLog.eventCounter;
@@ -253,7 +423,13 @@ static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
             ++canErrorLog.busOffCounter;
         }
 
-        CAN_RecordErrorCode(0x01u);
+        CAN_RecordErrorCode(DIAG_LOG_ERROR_CAN_BUS_OFF);
+        CAN_QueueDiagnosticLogEvent(DIAG_LOG_ERROR_CAN_BUS_OFF,
+                                    DIAG_LOG_EVENT_ERROR,
+                                    DIAG_LOG_CHANNEL_GLOBAL,
+                                    DIAG_LOG_SOURCE_CAN,
+                                    flags,
+                                    halError);
     }
 }
 
@@ -577,6 +753,7 @@ static void CAN_SendFrame(CAN_HandleTypeDef *hcan,
 
 void MX_CAN1_Init(void)
 {
+    CAN_LoadPersistentDiagnostics();
     CAN_RecordStartupResetFlags();
 
     __HAL_RCC_CAN1_FORCE_RESET();
@@ -802,5 +979,68 @@ void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
 
 void CAN_ReportFlashWriteError(void)
 {
-    CAN_RecordErrorCode(0x04u);
+    CAN_RecordErrorCode(DIAG_LOG_ERROR_FLASH_WRITE);
+    (void)CAN_WriteDiagnosticLogEvent(DIAG_LOG_ERROR_FLASH_WRITE,
+                                      DIAG_LOG_EVENT_ERROR,
+                                      DIAG_LOG_CHANNEL_GLOBAL,
+                                      DIAG_LOG_SOURCE_FLASH,
+                                      0u,
+                                      HAL_FLASH_GetError());
+}
+
+void CAN_ProcessPendingDiagnosticLog(void)
+{
+    bool hasPendingEvent = false;
+    uint8_t errorCode = 0u;
+    uint8_t eventType = 0u;
+    uint8_t channel = 0u;
+    uint8_t source = 0u;
+    uint16_t timestampHours = 0u;
+    uint16_t busOffCounter = 0u;
+    uint16_t watchdogCounter = 0u;
+    uint32_t flags = 0u;
+    uint32_t detail = 0u;
+    HAL_StatusTypeDef status;
+
+    taskENTER_CRITICAL();
+
+    if (pendingDiagnosticLog.pending)
+    {
+        errorCode = pendingDiagnosticLog.errorCode;
+        eventType = pendingDiagnosticLog.eventType;
+        channel = pendingDiagnosticLog.channel;
+        source = pendingDiagnosticLog.source;
+        timestampHours = pendingDiagnosticLog.timestampHours;
+        busOffCounter = pendingDiagnosticLog.canBusOffCounter;
+        watchdogCounter = pendingDiagnosticLog.wdgCounter;
+        flags = pendingDiagnosticLog.flags;
+        detail = pendingDiagnosticLog.detail;
+        pendingDiagnosticLog.pending = false;
+        hasPendingEvent = true;
+    }
+
+    taskEXIT_CRITICAL();
+
+    if (!hasPendingEvent)
+    {
+        return;
+    }
+
+    status = CAN_WriteDiagnosticLogEventSnapshot(errorCode,
+                                                 eventType,
+                                                 channel,
+                                                 source,
+                                                 flags,
+                                                 detail,
+                                                 timestampHours,
+                                                 busOffCounter,
+                                                 watchdogCounter);
+    if (status != HAL_OK)
+    {
+        /*
+         * Не пытаемся логировать ошибку записи журнала еще одной записью:
+         * так легко получить рекурсию "ошибка записи ошибки записи".
+         */
+        CAN_RecordErrorCode(DIAG_LOG_ERROR_FLASH_WRITE);
+    }
 }

@@ -64,6 +64,9 @@ void UART5_IRQHandler(void);
 void UART7_IRQHandler(void);
 void UART8_IRQHandler(void);
 /* USER CODE BEGIN EFP */
+void CAN1_RX0_IRQHandler(void);
+void CAN1_TX_IRQHandler(void);
+void CAN1_SCE_IRQHandler(void);
 
 /* USER CODE END EFP */
 

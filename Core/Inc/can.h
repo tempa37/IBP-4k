@@ -109,5 +109,6 @@ void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
                            const uint8_t *data,
                            uint8_t dlc);
 void CAN_ReportFlashWriteError(void);
+void CAN_ProcessPendingDiagnosticLog(void);
 
 #endif /* CAN_H */
