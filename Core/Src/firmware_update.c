@@ -336,8 +336,9 @@ void FW_LoadStoredImageInfo(void)
  *
  * Что важно понимать:
  * - новый приём образа сначала очищает metadata до NONE;
+ * - metadata любого образа пишется только после успешной CRC-проверки;
  * - сохранение slave image пишет тип и размер, но оставляет update-flag пустым;
- * - сохранение master image после CRC пишет и тип, и размер, и update-flag.
+ * - сохранение master image пишет и тип, и размер, и update-flag.
  */
 static HAL_StatusTypeDef FW_WriteStoredImageInfo(uint8_t imageKind,
                                                  uint32_t imageSizeBytes,
@@ -471,8 +472,10 @@ static HAL_StatusTypeDef FW_EraseStorageForState(FirmwareUpdateState_t *state)
 /*
  * Проверка CRC сохранённого образа.
  *
- * Сейчас эта функция реально используется только для master firmware IBP-4k.
- * Для slave image CRC-проверка на этапе хранения отключена по текущему ТЗ.
+ * Функция используется для master и slave firmware. Оба формата образа должны
+ * хранить эталонный CRC32 в последних 4 байтах, иначе metadata не записывается
+ * и дальнейшее обновление не запускается. Это специально защищает staging-слот
+ * от битых или неполностью принятых образов.
  *
  * Принцип:
  * - считаем CRC по образу без последних 4 байт;
@@ -862,9 +865,10 @@ bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canData, uint
  * Что важно по принципу:
  * - блоки считаются логическими кусками по 60 байт;
  * - физически master и slave пишутся в одну staging-область;
- * - различие между ними проявляется только на этапе завершения:
- *   master проверяет CRC и ставит update-flag,
- *   slave только фиксирует metadata о сохранённом образе.
+ * - оба типа образа проходят CRC-проверку на этапе завершения;
+ * - различие после успешной CRC только в metadata:
+ *   master ставит update-flag для bootloader,
+ *   slave фиксирует сохранённый образ и может запускать рассылку ведомым.
  */
 static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
                                 uint8_t dstNode,
@@ -1026,10 +1030,10 @@ static void FW_HandleDataPacket(FirmwareUpdateState_t *state,
         /*
          * Если записали все блоки - завершаем обновление.
          *
-         * Развилка намеренно разная:
-         * - master: проверяем CRC, записываем metadata и ставим update-flag;
-         * - slave: просто записываем metadata о том, что в общем слоте лежит
-         *   slave image такого-то размера.
+         * Сначала общий CRC-gate для master и slave. Развилка ниже намеренно
+         * разная только после успешной проверки:
+         * - master: записываем metadata и ставим update-flag;
+         * - slave: записываем metadata о том, что в общем слоте лежит slave image.
          */
         if (state->currentBlockNum >= state->totalBlocksExpected)
         {

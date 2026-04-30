@@ -8,6 +8,26 @@
 
 #define CAN_RX_QUEUE_SIZE  32u
 
+#define CAN_ERROR_LOG_FLAG_WARNING            (1UL << 0)
+#define CAN_ERROR_LOG_FLAG_PASSIVE            (1UL << 1)
+#define CAN_ERROR_LOG_FLAG_BUS_OFF            (1UL << 2)
+#define CAN_ERROR_LOG_FLAG_STUFF              (1UL << 3)
+#define CAN_ERROR_LOG_FLAG_FORM               (1UL << 4)
+#define CAN_ERROR_LOG_FLAG_ACK                (1UL << 5)
+#define CAN_ERROR_LOG_FLAG_BIT_RECESSIVE      (1UL << 6)
+#define CAN_ERROR_LOG_FLAG_BIT_DOMINANT       (1UL << 7)
+#define CAN_ERROR_LOG_FLAG_CRC                (1UL << 8)
+#define CAN_ERROR_LOG_FLAG_RX_FIFO0_OVERRUN   (1UL << 9)
+#define CAN_ERROR_LOG_FLAG_RX_FIFO1_OVERRUN   (1UL << 10)
+#define CAN_ERROR_LOG_FLAG_TX_ARB_LOST        (1UL << 11)
+#define CAN_ERROR_LOG_FLAG_TX_ERROR           (1UL << 12)
+#define CAN_ERROR_LOG_FLAG_TIMEOUT            (1UL << 13)
+#define CAN_ERROR_LOG_FLAG_HAL_STATE          (1UL << 14)
+#define CAN_ERROR_LOG_FLAG_PARAM              (1UL << 15)
+#define CAN_ERROR_LOG_FLAG_INTERNAL           (1UL << 16)
+#define CAN_ERROR_LOG_FLAG_RX_QUEUE_OVERFLOW  (1UL << 17)
+#define CAN_ERROR_LOG_FLAG_TX_MAILBOX_FULL    (1UL << 18)
+
 typedef struct
 {
     CAN_RxHeaderTypeDef header;
@@ -24,6 +44,16 @@ typedef struct
     volatile bool errorDetected;
     volatile uint32_t errorCode;
 } CanContext_t;
+
+typedef struct
+{
+    volatile uint32_t currentFlags;
+    volatile uint32_t latchedFlags;
+    volatile uint32_t lastHalError;
+    volatile uint32_t eventCounter;
+    volatile uint16_t busOffCounter;
+    volatile uint16_t lastTimestampHours;
+} CanErrorLog_t;
 
 /* CAN node addresses from the specification */
 #define CAN_NODE_KOU        1U
@@ -66,6 +96,7 @@ typedef struct
 #define CAN_MSG_FW_SLAVE_UPDATE_START   45U
 
 extern CanContext_t canContext;
+extern CanErrorLog_t canErrorLog;
 extern uint8_t CanlocalData[8];
 
 void MX_CAN1_Init(void);

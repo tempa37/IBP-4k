@@ -5,11 +5,11 @@
 #include "task.h"
 
 CanContext_t canContext = {0};
+CanErrorLog_t canErrorLog = {0};
 uint8_t CanlocalData[8] = {0};
 
 extern CAN_HandleTypeDef hcan1;
 
-static volatile uint16_t canBusOffCounter = 0u;
 static volatile uint16_t wdgResetCounter = 0u;
 static volatile uint16_t lastErrorTimestampHours = 0u;
 static volatile uint8_t lastErrorCode = 0u;
@@ -98,6 +98,8 @@ static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
 }
 
 static void CAN_RecordErrorCode(uint8_t errorCodeValue);
+static uint32_t CAN_BuildErrorLogFlags(uint32_t halError);
+static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags);
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData);
 
 static void CAN_RecordStartupResetFlags(void)
@@ -129,6 +131,132 @@ static void CAN_RecordErrorCode(uint8_t errorCodeValue)
     lastErrorTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
 }
 
+static uint32_t CAN_BuildErrorLogFlags(uint32_t halError)
+{
+    uint32_t flags = 0u;
+
+    if ((halError & HAL_CAN_ERROR_EWG) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_WARNING;
+    }
+
+    if ((halError & HAL_CAN_ERROR_EPV) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_PASSIVE;
+    }
+
+    if ((halError & HAL_CAN_ERROR_BOF) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_BUS_OFF;
+    }
+
+    if ((halError & HAL_CAN_ERROR_STF) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_STUFF;
+    }
+
+    if ((halError & HAL_CAN_ERROR_FOR) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_FORM;
+    }
+
+    if ((halError & HAL_CAN_ERROR_ACK) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_ACK;
+    }
+
+    if ((halError & HAL_CAN_ERROR_BR) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_BIT_RECESSIVE;
+    }
+
+    if ((halError & HAL_CAN_ERROR_BD) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_BIT_DOMINANT;
+    }
+
+    if ((halError & HAL_CAN_ERROR_CRC) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_CRC;
+    }
+
+    if ((halError & HAL_CAN_ERROR_RX_FOV0) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_RX_FIFO0_OVERRUN;
+    }
+
+    if ((halError & HAL_CAN_ERROR_RX_FOV1) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_RX_FIFO1_OVERRUN;
+    }
+
+    if ((halError & (HAL_CAN_ERROR_TX_ALST0 |
+                     HAL_CAN_ERROR_TX_ALST1 |
+                     HAL_CAN_ERROR_TX_ALST2)) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_TX_ARB_LOST;
+    }
+
+    if ((halError & (HAL_CAN_ERROR_TX_TERR0 |
+                     HAL_CAN_ERROR_TX_TERR1 |
+                     HAL_CAN_ERROR_TX_TERR2)) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_TX_ERROR;
+    }
+
+    if ((halError & HAL_CAN_ERROR_TIMEOUT) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_TIMEOUT;
+    }
+
+    if ((halError & (HAL_CAN_ERROR_NOT_INITIALIZED |
+                     HAL_CAN_ERROR_NOT_READY |
+                     HAL_CAN_ERROR_NOT_STARTED)) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_HAL_STATE;
+    }
+
+    if ((halError & HAL_CAN_ERROR_PARAM) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_PARAM;
+    }
+
+    if ((halError & HAL_CAN_ERROR_INTERNAL) != 0u)
+    {
+        flags |= CAN_ERROR_LOG_FLAG_INTERNAL;
+    }
+
+    return flags;
+}
+
+static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
+{
+    if ((halError == HAL_CAN_ERROR_NONE) && (flags == 0u))
+    {
+        return;
+    }
+
+    canErrorLog.currentFlags = flags;
+    canErrorLog.latchedFlags |= flags;
+    canErrorLog.lastHalError = halError;
+    canErrorLog.lastTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
+
+    if (canErrorLog.eventCounter < 0xFFFFFFFFu)
+    {
+        ++canErrorLog.eventCounter;
+    }
+
+    if ((flags & CAN_ERROR_LOG_FLAG_BUS_OFF) != 0u)
+    {
+        if (canErrorLog.busOffCounter < 0xFFFFu)
+        {
+            ++canErrorLog.busOffCounter;
+        }
+
+        CAN_RecordErrorCode(0x01u);
+    }
+}
+
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData)
 {
     uint8_t head;
@@ -144,6 +272,7 @@ static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uin
 
     if (nextHead == canContext.rxTail)
     {
+        CAN_RecordErrorLog(HAL_CAN_ERROR_NONE, CAN_ERROR_LOG_FLAG_RX_QUEUE_OVERFLOW);
         canContext.errorCode = 0x80000001u;
         canContext.errorDetected = true;
         canContext.dataReady = false;
@@ -334,7 +463,7 @@ static uint16_t CAN_GetDiagnosticWord(uint16_t msgId)
     switch (msgId)
     {
         case CAN_MSG_CAN_BUSOFF_COUNTER:
-            return canBusOffCounter;
+            return canErrorLog.busOffCounter;
 
         case CAN_MSG_WDG_RESET_COUNTER:
             return wdgResetCounter;
@@ -428,8 +557,18 @@ static void CAN_SendFrame(CAN_HandleTypeDef *hcan,
         {
             if (HAL_CAN_AddTxMessage(hcan, &txHeader, txData, &txMailbox) != HAL_OK)
             {
+                taskENTER_CRITICAL();
+                CAN_RecordErrorLog(hcan->ErrorCode, CAN_BuildErrorLogFlags(hcan->ErrorCode));
+                taskEXIT_CRITICAL();
                 lastProcessedCanError = hcan->ErrorCode;
             }
+        }
+        else
+        {
+            taskENTER_CRITICAL();
+            CAN_RecordErrorLog(hcan->ErrorCode, CAN_ERROR_LOG_FLAG_TX_MAILBOX_FULL);
+            taskEXIT_CRITICAL();
+            lastProcessedCanError = hcan->ErrorCode;
         }
 
         osMutexRelease(canContext.mutex);
@@ -603,23 +742,18 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
 void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
 {
+    uint32_t errorFlags;
+
     if ((hcan == NULL) || (hcan->Instance != CAN1))
     {
         return;
     }
 
-    if ((hcan->ErrorCode & HAL_CAN_ERROR_BOF) != 0u)
-    {
-        if (canBusOffCounter < 0xFFFFu)
-        {
-            ++canBusOffCounter;
-        }
-
-        CAN_RecordErrorCode(0x01u);
-    }
+    errorFlags = CAN_BuildErrorLogFlags(hcan->ErrorCode);
 
     {
         UBaseType_t irqState = taskENTER_CRITICAL_FROM_ISR();
+        CAN_RecordErrorLog(hcan->ErrorCode, errorFlags);
         canContext.errorCode = hcan->ErrorCode;
         canContext.errorDetected = true;
         canContext.dataReady = false;
