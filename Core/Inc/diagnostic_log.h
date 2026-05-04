@@ -69,6 +69,9 @@ typedef struct
 } DiagnosticFlashRecord_t;
 
 #define DIAG_LOG_RECORD_SIZE_BYTES       ((uint32_t)sizeof(DiagnosticFlashRecord_t))
+#define DIAG_LOG_RECORD_CHUNK_SIZE_BYTES 8u
+#define DIAG_LOG_RECORD_CHUNK_COUNT      (DIAG_LOG_RECORD_SIZE_BYTES / DIAG_LOG_RECORD_CHUNK_SIZE_BYTES)
+#define DIAG_LOG_INVALID_RECORD_INDEX    0xFFFFu
 
 typedef struct
 {
@@ -78,11 +81,24 @@ typedef struct
     uint8_t last_error_code;
 } DiagnosticLogCounters_t;
 
+typedef struct
+{
+    uint16_t record_capacity;       /* Сколько физических слотов журнала доступно во Flash. */
+    uint16_t valid_record_count;    /* Сколько слотов сейчас содержат валидные записи с правильным CRC. */
+    uint16_t last_record_index;     /* Физический индекс последней записи или 0xFFFF, если журнал пуст. */
+    uint8_t record_size_bytes;      /* Размер одной записи; сейчас 32 байта. */
+    uint8_t chunks_per_record;      /* Сколько 8-байтных CAN-ответов нужно для выгрузки одной записи. */
+} DiagnosticLogExportInfo_t;
+
 void DiagnosticLog_Init(void);
 bool DiagnosticLog_HadCrcError(void);
 bool DiagnosticLog_CheckLastRecordCrc(void);
 void DiagnosticLog_GetCounters(DiagnosticLogCounters_t *counters);
 const DiagnosticFlashRecord_t *DiagnosticLog_GetLastRecord(void);
+void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info);
+bool DiagnosticLog_ReadRecordChunk(uint16_t record_index,
+                                   uint8_t chunk_index,
+                                   uint8_t chunk_data[DIAG_LOG_RECORD_CHUNK_SIZE_BYTES]);
 
 HAL_StatusTypeDef DiagnosticLog_RecordEvent(uint8_t error_code,
                                             uint8_t event_type,

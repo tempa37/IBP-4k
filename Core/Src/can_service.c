@@ -42,7 +42,7 @@ static void CanService_HandleExtendedFrame(const CAN_RxHeaderTypeDef *header,
 
     if (!FW_HandleExtendedUpdateCommand(header->ExtId, data, dataLength))
     {
-        (void)CAN_HandleRegisterRequest(&hcan1, header->ExtId);
+        (void)CAN_HandleRegisterRequest(&hcan1, header->ExtId, data, dataLength);
     }
 }
 

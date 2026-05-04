@@ -406,6 +406,98 @@ const DiagnosticFlashRecord_t *DiagnosticLog_GetLastRecord(void)
     return &diagnosticLogLastRecord;
 }
 
+void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info)
+{
+    bool foundLatestRecord = false;
+    uint32_t latestSequence = 0u;
+
+    if (info == NULL)
+    {
+        return;
+    }
+
+    if (!diagnosticLogInitialized)
+    {
+        DiagnosticLog_Init();
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->record_capacity = (uint16_t)DIAG_LOG_RECORD_COUNT;
+    info->record_size_bytes = (uint8_t)DIAG_LOG_RECORD_SIZE_BYTES;
+    info->chunks_per_record = (uint8_t)DIAG_LOG_RECORD_CHUNK_COUNT;
+    info->last_record_index = DIAG_LOG_INVALID_RECORD_INDEX;
+
+    /*
+     * Для выгрузки журнала по CAN отдаем не указатель на внутреннее состояние,
+     * а короткую сводку: ПК сам решает, какие физические слоты читать дальше.
+     */
+    for (uint32_t index = 0u; index < DIAG_LOG_RECORD_COUNT; ++index)
+    {
+        const DiagnosticFlashRecord_t *record =
+            (const DiagnosticFlashRecord_t *)DiagnosticLog_RecordAddress(index);
+
+        if (!DiagnosticLog_IsRecordValid(record))
+        {
+            continue;
+        }
+
+        if (info->valid_record_count < 0xFFFFu)
+        {
+            ++info->valid_record_count;
+        }
+
+        if (!foundLatestRecord || (record->sequence > latestSequence))
+        {
+            foundLatestRecord = true;
+            latestSequence = record->sequence;
+            info->last_record_index = (uint16_t)index;
+        }
+    }
+}
+
+bool DiagnosticLog_ReadRecordChunk(uint16_t record_index,
+                                   uint8_t chunk_index,
+                                   uint8_t chunk_data[DIAG_LOG_RECORD_CHUNK_SIZE_BYTES])
+{
+    const DiagnosticFlashRecord_t *record;
+    const uint8_t *recordBytes;
+    uint32_t byteOffset;
+
+    if (chunk_data == NULL)
+    {
+        return false;
+    }
+
+    memset(chunk_data, 0xFF, DIAG_LOG_RECORD_CHUNK_SIZE_BYTES);
+
+    if (!diagnosticLogInitialized)
+    {
+        DiagnosticLog_Init();
+    }
+
+    if ((record_index >= DIAG_LOG_RECORD_COUNT) ||
+        (chunk_index >= DIAG_LOG_RECORD_CHUNK_COUNT))
+    {
+        return false;
+    }
+
+    record = (const DiagnosticFlashRecord_t *)DiagnosticLog_RecordAddress(record_index);
+    if (!DiagnosticLog_IsRecordValid(record))
+    {
+        return false;
+    }
+
+    /*
+     * Одна запись 32 байта, CAN несет 8 байт. Поэтому запись читается
+     * четырьмя чанками: 0 -> байты 0..7, 1 -> 8..15, 2 -> 16..23, 3 -> 24..31.
+     */
+    recordBytes = (const uint8_t *)record;
+    byteOffset = (uint32_t)chunk_index * DIAG_LOG_RECORD_CHUNK_SIZE_BYTES;
+    memcpy(chunk_data, &recordBytes[byteOffset], DIAG_LOG_RECORD_CHUNK_SIZE_BYTES);
+
+    return true;
+}
+
 HAL_StatusTypeDef DiagnosticLog_RecordEvent(uint8_t error_code,
                                             uint8_t event_type,
                                             uint8_t channel,

@@ -19,26 +19,9 @@ except ImportError:
     sys.exit(1)
 
 
-#
-# Параметры транспортного протокола обновления прошивки.
-#
-# Они должны совпадать с прошивкой приёмника:
-# - один логический блок = 10 CAN-пакетов;
-# - полезная нагрузка одного пакета = 6 байт;
-# - итого один блок записи/подтверждения = 60 байт.
-#
-# Отдельно важно:
-# - размер master firmware IBP-4k сейчас жёстко считается равным 64 KB;
-# - по этому размеру и uploader, и приёмник понимают, что это master image;
-# - всё, что меньше 64 KB, трактуется как slave image.
-#
 FW_BLOCK_SIZE_PACKETS = 10
 FW_PACKET_DATA_SIZE = 6
 FW_BLOCK_SIZE_BYTES = FW_BLOCK_SIZE_PACKETS * FW_PACKET_DATA_SIZE
-IBP4K_MASTER_FW_SIZE = 64 * 1024
-SLAVE_TARGET_FW_SIZE = 32 * 1024
-FW_CRC_TAIL_SIZE = 4
-FW_CRC32_POLY = 0x04C11DB7
 
 CAN_PROTOCOL_ADDR_KOU = 1
 CAN_PROTOCOL_ADDR_IBP4K = 20
@@ -56,6 +39,8 @@ CAN_PROTOCOL_MSG_CAN_BUS_OFF_COUNTER = 30
 CAN_PROTOCOL_MSG_WDG_RESET_COUNTER = 31
 CAN_PROTOCOL_MSG_LAST_ERROR_TIMESTAMP = 32
 CAN_PROTOCOL_MSG_LAST_ERROR_CODE = 33
+CAN_PROTOCOL_MSG_DIAG_LOG_INFO = 34
+CAN_PROTOCOL_MSG_DIAG_LOG_READ = 35
 CAN_PROTOCOL_MSG_FW_SLAVE_BEGIN = 40
 CAN_PROTOCOL_MSG_FW_SLAVE_DATA = 41
 CAN_PROTOCOL_MSG_FW_ACK = 42
@@ -66,38 +51,25 @@ CAN_PROTOCOL_MSG_FW_SLAVE_UPDATE_START = 45
 CAN_PROTOCOL_PRIORITY_DEFAULT = 0
 CAN_PROTOCOL_PRIORITY_DIAGNOSTIC = 3
 
+DEFAULT_CAN_BITRATE = 250000
+
 TIMEOUT_INIT = 10.0
 TIMEOUT_ACK = 1.5
 MAX_RETRIES = 3
 
-DEFAULT_REQUEST_TIMEOUT = 0.75
-DEFAULT_REQUEST_ATTEMPTS = 3
-DEFAULT_REQUEST_PAUSE_MS = 40
+DEFAULT_REQUEST_TIMEOUT = 2.0
+DEFAULT_REQUEST_ATTEMPTS = 5
+DEFAULT_REQUEST_PAUSE_MS = 80
+DEFAULT_LOG_REQUEST_TIMEOUT = 5.0
+DEFAULT_LOG_REQUEST_ATTEMPTS = 5
+DEFAULT_LOG_REQUEST_PAUSE_MS = 100
 
-
-def firmware_crc32(data: bytes) -> int:
-    crc = 0xFFFFFFFF
-    for value in data:
-        crc ^= value << 24
-        for _ in range(8):
-            if crc & 0x80000000:
-                crc = ((crc << 1) ^ FW_CRC32_POLY) & 0xFFFFFFFF
-            else:
-                crc = (crc << 1) & 0xFFFFFFFF
-    return crc
-
-
-def firmware_has_valid_crc_tail(data: bytes) -> bool:
-    if len(data) < FW_CRC_TAIL_SIZE:
-        return False
-
-    calculated_crc = firmware_crc32(data[:-FW_CRC_TAIL_SIZE])
-    stored_crc = struct.unpack("<I", data[-FW_CRC_TAIL_SIZE:])[0]
-    return calculated_crc == stored_crc
-
-
-def firmware_append_crc_tail(data: bytes) -> bytes:
-    return data + struct.pack("<I", firmware_crc32(data))
+# Параметры формата диагностического журнала должны совпадать с diagnostic_log.h.
+DIAG_LOG_MAGIC = 0x474F4C44
+DIAG_LOG_RECORD_SIZE = 32
+DIAG_LOG_RECORD_CHUNK_SIZE = 8
+DIAG_LOG_INVALID_INDEX = 0xFFFF
+DIAG_LOG_RECORD_STRUCT = struct.Struct("<IIIIHHHHBBBBI")
 
 ERROR_FLAG_BITS = (
     (0, "BQ_ERROR"),
@@ -113,6 +85,16 @@ LAST_ERROR_CODE_DESCRIPTIONS = {
     0x02: "Сброс по Independent Watchdog (IWDG)",
     0x03: "Ошибка контрольной суммы диагностических данных в Flash",
     0x04: "Ошибка записи в Flash",
+}
+
+DIAG_LOG_EVENT_DESCRIPTIONS = {
+    0x01: "диагностическая ошибка",
+}
+
+DIAG_LOG_SOURCE_DESCRIPTIONS = {
+    0x01: "CAN",
+    0x02: "Watchdog",
+    0x03: "Flash",
 }
 
 
@@ -231,6 +213,36 @@ class RegisterReadResult:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class DiagnosticLogInfo:
+    record_capacity: int
+    record_size: int
+    chunks_per_record: int
+    valid_count: int
+    last_record_index: int
+
+
+@dataclass(frozen=True)
+class DiagnosticLogRecord:
+    physical_index: int
+    magic: int
+    sequence: int
+    flags: int
+    detail: int
+    size: int
+    timestamp_hours: int
+    can_busoff_counter: int
+    wdg_reset_counter: int
+    error_code: int
+    event_type: int
+    channel: int
+    source: int
+    crc32: int
+    raw: bytes
+    crc_ok: bool = True
+    calculated_crc32: int = 0
+
+
 def build_protocol_can_id(src: int, dst: int, msg_id: int, priority: int = 0) -> int:
     if not (0 <= src <= 0x7F):
         raise ValueError(f"SRC out of range: {src}")
@@ -304,8 +316,153 @@ def format_register_value(definition: RegisterRequestDef, value: int) -> str:
     return f"{value} (0x{value & 0xFFFF:04X})"
 
 
+def diagnostic_log_crc32(data: bytes) -> int:
+    # CRC журнала повторяет алгоритм прошивки: reflected CRC32 с финальным xor.
+    crc = 0xFFFFFFFF
+    for value in data:
+        crc ^= value
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xEDB88320
+            else:
+                crc >>= 1
+            crc &= 0xFFFFFFFF
+    return crc ^ 0xFFFFFFFF
+
+
+def parse_diagnostic_log_info(payload: bytes) -> DiagnosticLogInfo:
+    if len(payload) != 8:
+        raise ValueError(f"expected 8 log-info bytes, got {len(payload)}")
+
+    return DiagnosticLogInfo(
+        record_capacity=int.from_bytes(payload[0:2], "little"),
+        record_size=payload[2],
+        chunks_per_record=payload[3],
+        valid_count=int.from_bytes(payload[4:6], "little"),
+        last_record_index=int.from_bytes(payload[6:8], "little"),
+    )
+
+
+def parse_diagnostic_log_record(index: int, raw: bytes) -> Optional[DiagnosticLogRecord]:
+    if len(raw) != DIAG_LOG_RECORD_SIZE:
+        return None
+
+    (
+        magic,
+        sequence,
+        flags,
+        detail,
+        size,
+        timestamp_hours,
+        can_busoff_counter,
+        wdg_reset_counter,
+        error_code,
+        event_type,
+        channel,
+        source,
+        crc32,
+    ) = DIAG_LOG_RECORD_STRUCT.unpack(raw)
+
+    if magic != DIAG_LOG_MAGIC or size != DIAG_LOG_RECORD_SIZE:
+        return None
+
+    calculated_crc = diagnostic_log_crc32(raw[: DIAG_LOG_RECORD_STRUCT.size - 4])
+
+    return DiagnosticLogRecord(
+        physical_index=index,
+        magic=magic,
+        sequence=sequence,
+        flags=flags,
+        detail=detail,
+        size=size,
+        timestamp_hours=timestamp_hours,
+        can_busoff_counter=can_busoff_counter,
+        wdg_reset_counter=wdg_reset_counter,
+        error_code=error_code,
+        event_type=event_type,
+        channel=channel,
+        source=source,
+        crc32=crc32,
+        raw=raw,
+        crc_ok=(calculated_crc == crc32),
+        calculated_crc32=calculated_crc,
+    )
+
+
+def format_diagnostic_log_channel(channel: int) -> str:
+    if channel == 0xFF:
+        return "глобальная ошибка"
+    if 0 <= channel <= 3:
+        return f"ПСИП {channel} (лоток АКБ {channel + 1})"
+    return f"неизвестный канал 0x{channel:02X}"
+
+
+def format_diagnostic_log_record(record: DiagnosticLogRecord) -> list[str]:
+    error_description = LAST_ERROR_CODE_DESCRIPTIONS.get(
+        record.error_code,
+        "зарезервировано/неизвестно",
+    )
+    event_description = DIAG_LOG_EVENT_DESCRIPTIONS.get(
+        record.event_type,
+        f"неизвестный тип 0x{record.event_type:02X}",
+    )
+    source_description = DIAG_LOG_SOURCE_DESCRIPTIONS.get(
+        record.source,
+        f"неизвестный источник 0x{record.source:02X}",
+    )
+
+    return [
+        f"Физический индекс:         {record.physical_index}",
+        f"Sequence:                  {record.sequence}",
+        f"Код ошибки:                0x{record.error_code:02X} ({error_description})",
+        f"Тип события:               0x{record.event_type:02X} ({event_description})",
+        f"Канал:                     {format_diagnostic_log_channel(record.channel)}",
+        f"Источник:                  {source_description}",
+        f"Время ошибки, часов:       {record.timestamp_hours}",
+        f"CAN BusOff Counter:        {record.can_busoff_counter}",
+        f"WDG Reset Counter:         {record.wdg_reset_counter}",
+        f"Flags:                     0x{record.flags:08X}",
+        f"Detail:                    0x{record.detail:08X}",
+        f"CRC32:                     0x{record.crc32:08X}",
+        f"CRC32 calculated:          0x{record.calculated_crc32:08X}",
+        f"CRC32 check:               {'OK' if record.crc_ok else 'FAIL (STM32 запись отдала, но PC-проверка не сошлась)'}",
+        f"Raw:                       {' '.join(f'{byte:02X}' for byte in record.raw)}",
+    ]
+
+
+def build_diagnostic_log_text(info: DiagnosticLogInfo, records: list[DiagnosticLogRecord]) -> str:
+    last_index = (
+        "нет"
+        if info.last_record_index == DIAG_LOG_INVALID_INDEX
+        else str(info.last_record_index)
+    )
+    lines = [
+        "Выгрузка диагностического журнала IBP-4k",
+        f"Дата выгрузки:             {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "Сводка журнала:",
+        f"  Физических слотов:       {info.record_capacity}",
+        f"  Валидных записей:        {info.valid_count}",
+        f"  Размер записи:           {info.record_size} байт",
+        f"  CAN-чанков на запись:    {info.chunks_per_record}",
+        f"  Индекс последней записи: {last_index}",
+        "",
+        "Записи:",
+    ]
+
+    if not records:
+        lines.append("  Валидных записей для выгрузки нет.")
+        return "\n".join(lines) + "\n"
+
+    for number, record in enumerate(records, start=1):
+        lines.extend(["", "=" * 88, f"Запись #{number}"])
+        lines.extend(format_diagnostic_log_record(record))
+
+    return "\n".join(lines) + "\n"
+
+
 class CandleLightCanClient:
-    def __init__(self, bitrate: int = 125000, verbose: bool = False):
+    def __init__(self, bitrate: int = DEFAULT_CAN_BITRATE, verbose: bool = False):
         self.bitrate = bitrate
         self.verbose = verbose
         self.dev = None
@@ -398,7 +555,9 @@ class CandleLightCanClient:
         expected_id: int,
         timeout: float,
         is_extended_id: Optional[bool] = None,
+        echo_id: Optional[int] = None,
     ) -> Optional[bytes]:
+        saw_echo = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             frame = self.read_frame(timeout_ms=100)
@@ -408,6 +567,13 @@ class CandleLightCanClient:
                 continue
             if frame.arbitration_id == expected_id:
                 return frame.data
+            if echo_id is not None and frame.arbitration_id == echo_id:
+                saw_echo = True
+        if saw_echo:
+            print(
+                f"Only local TX echo was seen for 0x{echo_id:08X}; "
+                f"no target response 0x{expected_id:08X}."
+            )
         return None
 
     def drain_rx(self, window_s: float = 0.15) -> None:
@@ -419,16 +585,6 @@ class CandleLightCanClient:
 
 
 class FirmwareUploader:
-    """
-    Отправитель прошивки по CAN для IBP-4k.
-
-    Важный принцип текущего протокола:
-    - uploader больше не выбирает реальное место хранения по адресу;
-    - он передаёт размер образа и блоки данных;
-    - приёмник по размеру решает, master это или slave;
-    - физически оба типа образов сохраняются в один общий staging-слот.
-    """
-
     def __init__(
         self,
         client: CandleLightCanClient,
@@ -436,14 +592,12 @@ class FirmwareUploader:
         slave_num: int = 0,
         src_addr: int = CAN_PROTOCOL_ADDR_KOU,
         dst_addr: int = CAN_PROTOCOL_ADDR_IBP4K,
-        append_crc: bool = False,
     ):
         self.client = client
         self.verbose = verbose
         self.slave_num = slave_num
         self.src_addr = src_addr
         self.dst_addr = dst_addr
-        self.append_crc = append_crc
         self.firmware: Optional[bytes] = None
         self.is_master = False
         self.total_blocks = 0
@@ -460,64 +614,13 @@ class FirmwareUploader:
         )
 
     def load_firmware(self, path: Path, is_master: bool) -> bool:
-        """
-        Читает бинарник и определяет его логический тип по размеру.
-
-        Почему именно так:
-        - на стороне приёмника источник истины сейчас тоже размер образа;
-        - ключ `--master` здесь уже не может насильно переопределить тип;
-        - если пользователь выбрал не тот режим руками, uploader честно
-          предупреждает и продолжает с тем типом, который следует из размера.
-        """
         try:
             self.firmware = path.read_bytes()
         except Exception as exc:
             print(f"Failed to read firmware: {exc}")
             return False
 
-        detected_is_master = len(self.firmware) == IBP4K_MASTER_FW_SIZE
-        if detected_is_master:
-            if not firmware_has_valid_crc_tail(self.firmware):
-                print(
-                    "Master firmware CRC32 tail is invalid. "
-                    "The receiver will reject this image."
-                )
-                return False
-        else:
-            if len(self.firmware) > SLAVE_TARGET_FW_SIZE:
-                print(
-                    f"Slave firmware is too large: {len(self.firmware)} bytes, "
-                    f"limit is {SLAVE_TARGET_FW_SIZE} bytes including CRC32 tail."
-                )
-                return False
-
-            if not firmware_has_valid_crc_tail(self.firmware):
-                if not self.append_crc:
-                    print(
-                        "Slave firmware has no valid 4-byte little-endian CRC32 tail. "
-                        "Rebuild it with CRC, or pass --append-crc for a raw binary."
-                    )
-                    return False
-
-                if len(self.firmware) + FW_CRC_TAIL_SIZE > SLAVE_TARGET_FW_SIZE:
-                    print(
-                        f"Cannot append CRC32 tail: {len(self.firmware)} + "
-                        f"{FW_CRC_TAIL_SIZE} exceeds {SLAVE_TARGET_FW_SIZE} bytes."
-                    )
-                    return False
-
-                calculated_crc = firmware_crc32(self.firmware)
-                self.firmware = self.firmware + struct.pack("<I", calculated_crc)
-                print(f"Appended slave CRC32 tail: 0x{calculated_crc:08X}")
-
-        if is_master != detected_is_master:
-            mode = "master" if detected_is_master else "slave"
-            print(
-                f"Firmware size decides the target. "
-                f"Ignoring {'--master' if is_master else 'implicit slave mode'}, using {mode}."
-            )
-
-        self.is_master = detected_is_master
+        self.is_master = is_master
         self.total_blocks = (len(self.firmware) + FW_BLOCK_SIZE_BYTES - 1) // FW_BLOCK_SIZE_BYTES
         target = "master" if self.is_master else "slave"
         print(f"Firmware: {path}")
@@ -527,29 +630,22 @@ class FirmwareUploader:
         return True
 
     def init_update(self) -> bool:
-        """
-        Запускает новую сессию обновления на приёмнике.
+        if self.firmware is None:
+            print("Firmware is not loaded.")
+            return False
 
-        BEGIN-кадр содержит:
-        - total_blocks: сколько логических блоков по 60 байт надо принять;
-        - exact size: точный размер бинарника в байтах.
-
-        Это важно, потому что приёмник использует именно размер, чтобы:
-        - различить master/slave image;
-        - проверить согласованность size и total_blocks;
-        - понять, сколько байт реально писать в последнем блоке.
-        """
+        image_size = len(self.firmware)
         init_id = self._command_id(
             CAN_PROTOCOL_MSG_FW_MASTER_BEGIN
             if self.is_master
             else CAN_PROTOCOL_MSG_FW_SLAVE_BEGIN
         )
         ack_id = self._ack_id()
-        request = struct.pack(">HI", self.total_blocks, len(self.firmware))
+        request = struct.pack(">HI", self.total_blocks, image_size)
 
         print(
             f"Init update: send 0x{init_id:08X}, "
-            f"total_blocks={self.total_blocks}, size={len(self.firmware)}"
+            f"total_blocks={self.total_blocks}, size={image_size}"
         )
         self.client.drain_rx()
         if not self.client.send_frame(init_id, request, is_extended_id=True):
@@ -573,14 +669,6 @@ class FirmwareUploader:
         return False
 
     def send_block(self, block_num: int) -> bool:
-        """
-        Отправляет один логический блок прошивки.
-
-        Один блок режется на 10 CAN-пакетов по 6 байт.
-        Последний неполный пакет и последний неполный блок добиваются 0xFF,
-        потому что транспорт работает фиксированными кусками, а реальный размер
-        образа приёмник уже знает из BEGIN-кадра.
-        """
         if self.firmware is None:
             return False
 
@@ -636,17 +724,6 @@ class FirmwareUploader:
         return True
 
     def post_upload(self) -> None:
-        """
-        Дополнительное действие после загрузки образа.
-
-        Для master firmware ничего не делаем:
-        - после успешного CRC приёмник сам ставит update-flag и уходит в reset.
-
-        Для slave firmware отправляется отдельная команда UPDATE_START:
-        - она не загружает новый образ по CAN;
-        - она только просит устройство начать UART-прошивку конкретного slave
-          уже сохранённым в staging-слоте образом.
-        """
         if self.is_master:
             return
 
@@ -662,12 +739,6 @@ class FirmwareUploader:
         )
 
     def upload(self) -> bool:
-        """
-        Полный цикл загрузки:
-        1. BEGIN;
-        2. последовательная отправка всех блоков;
-        3. пост-действие для slave image.
-        """
         if self.firmware is None:
             print("Firmware is not loaded.")
             return False
@@ -814,6 +885,187 @@ class RegisterDumper:
         return all_ok
 
 
+class DiagnosticLogDumper:
+    def __init__(
+        self,
+        client: CandleLightCanClient,
+        request_timeout: float,
+        attempts: int,
+        pause_ms: int,
+        src_addr: int,
+        dst_addr: int,
+    ):
+        self.client = client
+        self.request_timeout = request_timeout
+        self.attempts = attempts
+        self.pause_s = max(0.0, pause_ms / 1000.0)
+        self.src_addr = src_addr
+        self.dst_addr = dst_addr
+
+    def _request_payload(self, msg_id: int, payload: bytes = b"") -> Optional[bytes]:
+        request_id = build_protocol_can_id(
+            self.src_addr,
+            self.dst_addr,
+            msg_id,
+            CAN_PROTOCOL_PRIORITY_DEFAULT,
+        )
+        response_id = build_protocol_can_id(
+            self.dst_addr,
+            self.src_addr,
+            msg_id,
+            CAN_PROTOCOL_PRIORITY_DIAGNOSTIC,
+        )
+
+        # Лог-запросы отправляем тем же рабочим способом, что и dump: drain -> TX EXT -> wait RX EXT.
+        for attempt in range(1, self.attempts + 1):
+            print(f"Requesting log MSG_ID={msg_id}, attempt {attempt}/{self.attempts}...")
+            self.client.drain_rx()
+
+            if not self.client.send_frame(request_id, payload, is_extended_id=True):
+                time.sleep(self.pause_s)
+                continue
+
+            response = self.client.wait_for_id(
+                response_id,
+                timeout=self.request_timeout,
+                is_extended_id=True,
+                echo_id=request_id,
+            )
+            if response is not None:
+                time.sleep(self.pause_s)
+                return response
+
+            time.sleep(self.pause_s)
+
+        return None
+
+    def read_info(self) -> Optional[DiagnosticLogInfo]:
+        payload = self._request_payload(CAN_PROTOCOL_MSG_DIAG_LOG_INFO)
+        if payload is None:
+            print("Log info timeout.")
+            return None
+
+        try:
+            return parse_diagnostic_log_info(payload)
+        except ValueError as exc:
+            print(f"Bad log info response: {exc}")
+            return None
+
+    def read_record(self, index: int, chunks_per_record: int) -> Optional[DiagnosticLogRecord]:
+        raw = bytearray()
+
+        # Одна запись во Flash больше одного CAN-кадра, поэтому читаем ее частями по 8 байт.
+        for chunk in range(chunks_per_record):
+            request = struct.pack("<HB", index & 0xFFFF, chunk & 0xFF)
+            payload = self._request_payload(CAN_PROTOCOL_MSG_DIAG_LOG_READ, request)
+            if payload is None or len(payload) != DIAG_LOG_RECORD_CHUNK_SIZE:
+                return None
+
+            # Первый чанк содержит magic. Если слот пустой, нет смысла долбить CAN еще тремя запросами.
+            if chunk == 0 and int.from_bytes(payload[:4], "little") != DIAG_LOG_MAGIC:
+                return None
+
+            raw.extend(payload)
+
+        return parse_diagnostic_log_record(index, bytes(raw))
+
+    def read_records(
+        self,
+        info: DiagnosticLogInfo,
+        *,
+        index: Optional[int],
+        latest: bool,
+        limit: Optional[int],
+    ) -> list[DiagnosticLogRecord]:
+        if index is not None:
+            record = self.read_record(index, info.chunks_per_record)
+            return [record] if record is not None else []
+
+        if latest:
+            if info.last_record_index == DIAG_LOG_INVALID_INDEX:
+                return []
+            record = self.read_record(info.last_record_index, info.chunks_per_record)
+            return [record] if record is not None else []
+
+        target_count = info.valid_count
+        if limit is not None:
+            target_count = min(target_count, max(0, limit))
+        if target_count == 0:
+            return []
+
+        records: list[DiagnosticLogRecord] = []
+        scanned_indices: set[int] = set()
+
+        if info.last_record_index != DIAG_LOG_INVALID_INDEX:
+            first_index = (info.last_record_index - target_count + 1) % info.record_capacity
+            for offset in range(target_count):
+                physical_index = (first_index + offset) % info.record_capacity
+                scanned_indices.add(physical_index)
+                record = self.read_record(physical_index, info.chunks_per_record)
+                if record is not None:
+                    records.append(record)
+                if len(records) >= target_count:
+                    break
+
+        if len(records) >= target_count:
+            records.sort(key=lambda item: item.sequence)
+            return records
+
+        for physical_index in range(info.record_capacity):
+            if physical_index in scanned_indices:
+                continue
+            if physical_index == 0 or (physical_index + 1) % 256 == 0:
+                print(
+                    "Scanning log slots: "
+                    f"{physical_index + 1}/{info.record_capacity}, "
+                    f"found {len(records)}/{target_count}"
+                )
+
+            record = self.read_record(physical_index, info.chunks_per_record)
+            if record is None:
+                continue
+
+            records.append(record)
+            if len(records) >= target_count:
+                break
+
+        # В txt удобнее видеть журнал по времени записи, а не по физическим слотам кольца.
+        records.sort(key=lambda item: item.sequence)
+        return records
+
+    def dump_to_txt(
+        self,
+        output_path: Path,
+        *,
+        index: Optional[int],
+        latest: bool,
+        limit: Optional[int],
+    ) -> bool:
+        info = self.read_info()
+        if info is None:
+            return False
+
+        if info.record_size != DIAG_LOG_RECORD_SIZE:
+            print(
+                f"Unsupported log record size: {info.record_size}, "
+                f"expected {DIAG_LOG_RECORD_SIZE}."
+            )
+            return False
+        if info.chunks_per_record * DIAG_LOG_RECORD_CHUNK_SIZE != info.record_size:
+            print(
+                f"Unsupported log chunk layout: {info.chunks_per_record} chunks "
+                f"for {info.record_size} bytes."
+            )
+            return False
+
+        records = self.read_records(info, index=index, latest=latest, limit=limit)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(build_diagnostic_log_text(info, records), encoding="utf-8")
+        print(f"Log txt written: {output_path}")
+        print(f"Records written: {len(records)}")
+        return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CandleLight CAN tool: TЗ register dump and firmware upload."
@@ -824,7 +1076,7 @@ def build_parser() -> argparse.ArgumentParser:
         "dump",
         help="Request all CAN registers from the TЗ protocol and print them separately.",
     )
-    dump_parser.add_argument("--bitrate", type=int, default=125000, help="CAN bitrate in bps.")
+    dump_parser.add_argument("--bitrate", type=int, default=DEFAULT_CAN_BITRATE, help="CAN bitrate in bps.")
     dump_parser.add_argument(
         "--timeout",
         type=float,
@@ -861,23 +1113,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print every CAN TX/RX frame.",
     )
 
+    log_parser = subparsers.add_parser(
+        "log",
+        help="Read diagnostic Flash log through CAN and save it to a TXT file.",
+    )
+    log_parser.add_argument("--bitrate", type=int, default=DEFAULT_CAN_BITRATE, help="CAN bitrate in bps.")
+    log_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_LOG_REQUEST_TIMEOUT,
+        help="Max wait time for one log response in seconds.",
+    )
+    log_parser.add_argument(
+        "--attempts",
+        type=int,
+        default=DEFAULT_LOG_REQUEST_ATTEMPTS,
+        help="How many times to retry each log request before giving up.",
+    )
+    log_parser.add_argument(
+        "--pause-ms",
+        type=int,
+        default=DEFAULT_LOG_REQUEST_PAUSE_MS,
+        help="Delay between log chunk requests in milliseconds.",
+    )
+    log_parser.add_argument(
+        "--src",
+        type=int,
+        default=CAN_PROTOCOL_ADDR_KOU,
+        help="SRC address for log requests.",
+    )
+    log_parser.add_argument(
+        "--dst",
+        type=int,
+        default=CAN_PROTOCOL_ADDR_IBP4K,
+        help="DST address for log requests.",
+    )
+    log_parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path("diagnostic_log.txt"),
+        help="TXT file for the exported diagnostic log.",
+    )
+    log_parser.add_argument(
+        "--index",
+        type=int,
+        help="Read only one physical log record index.",
+    )
+    log_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="Read only the latest valid log record.",
+    )
+    log_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Stop full scan after this many valid records.",
+    )
+    log_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print every CAN TX/RX frame.",
+    )
+
     upload_parser = subparsers.add_parser(
         "upload",
         help="Upload firmware over CAN using the existing STM32 boot/update protocol.",
     )
     upload_parser.add_argument("firmware", type=Path, help="Path to firmware image.")
-    upload_parser.add_argument(
-        "--master",
-        action="store_true",
-        help="Deprecated. Target is auto-detected from firmware size.",
-    )
-    upload_parser.add_argument("--bitrate", type=int, default=125000, help="CAN bitrate in bps.")
+    upload_parser.add_argument("--master", action="store_true", help="Upload master firmware.")
+    upload_parser.add_argument("--bitrate", type=int, default=DEFAULT_CAN_BITRATE, help="CAN bitrate in bps.")
     upload_parser.add_argument("--quiet", action="store_true", help="Minimal upload output.")
-    upload_parser.add_argument(
-        "--append-crc",
-        action="store_true",
-        help="Append the receiver-compatible CRC32 tail to a raw slave firmware image.",
-    )
     upload_parser.add_argument(
         "--src",
         type=int,
@@ -903,7 +1208,7 @@ def build_parser() -> argparse.ArgumentParser:
 def normalize_argv(argv: Sequence[str]) -> list[str]:
     if not argv:
         return ["dump"]
-    if argv[0] in {"dump", "upload", "-h", "--help"}:
+    if argv[0] in {"dump", "log", "upload", "-h", "--help"}:
         return list(argv)
     if argv[0].startswith("-"):
         return ["dump", *argv]
@@ -930,6 +1235,38 @@ def run_dump(args: argparse.Namespace) -> int:
         client.disconnect()
 
 
+def run_log(args: argparse.Namespace) -> int:
+    if args.index is not None and args.latest:
+        print("Use either --index or --latest, not both.")
+        return 1
+
+    client = CandleLightCanClient(bitrate=args.bitrate, verbose=args.verbose)
+    try:
+        if not client.connect():
+            return 1
+
+        dumper = DiagnosticLogDumper(
+            client=client,
+            request_timeout=args.timeout,
+            attempts=max(1, args.attempts),
+            pause_ms=max(0, args.pause_ms),
+            src_addr=args.src,
+            dst_addr=args.dst,
+        )
+        return (
+            0
+            if dumper.dump_to_txt(
+                args.out,
+                index=args.index,
+                latest=args.latest,
+                limit=args.limit,
+            )
+            else 2
+        )
+    finally:
+        client.disconnect()
+
+
 def run_upload(args: argparse.Namespace) -> int:
     if not args.firmware.exists():
         print(f"Firmware file does not exist: {args.firmware}")
@@ -947,7 +1284,6 @@ def run_upload(args: argparse.Namespace) -> int:
             slave_num=args.slave_num,
             src_addr=args.src,
             dst_addr=args.dst,
-            append_crc=args.append_crc,
         )
         if not uploader.load_firmware(args.firmware, is_master=args.master):
             return 1
@@ -964,6 +1300,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "dump":
             return run_dump(args)
+        if args.command == "log":
+            return run_log(args)
         if args.command == "upload":
             return run_upload(args)
     except KeyboardInterrupt:

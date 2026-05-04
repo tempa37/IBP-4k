@@ -47,7 +47,9 @@ static const uint16_t canRequestMsgIds[] =
     CAN_MSG_CAN_BUSOFF_COUNTER,
     CAN_MSG_WDG_RESET_COUNTER,
     CAN_MSG_LAST_ERROR_TIMESTAMP,
-    CAN_MSG_LAST_ERROR_CODE
+    CAN_MSG_LAST_ERROR_CODE,
+    CAN_MSG_DIAG_LOG_INFO,
+    CAN_MSG_DIAG_LOG_READ
 };
 
 static const uint16_t canFirmwareMsgIds[] =
@@ -84,6 +86,10 @@ static HAL_StatusTypeDef CAN_ConfigFilterBank(uint8_t bank, uint32_t encodedId1,
 
 static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
 {
+    volatile uint32_t fr1 = 0;
+    volatile uint32_t fr2 = 0;
+    
+    
     uint32_t encodedIds[(sizeof(canRequestMsgIds) / sizeof(canRequestMsgIds[0])) +
                         (sizeof(canFirmwareMsgIds) / sizeof(canFirmwareMsgIds[0]))] = {0};
     size_t encodedCount = 0u;
@@ -111,6 +117,12 @@ static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
         }
     }
 
+    
+    
+    fr1 = CAN1->sFilterRegister[6].FR1;
+    fr2 = CAN1->sFilterRegister[6].FR2;
+      
+      
     return HAL_OK;
 }
 
@@ -409,13 +421,16 @@ static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
     canErrorLog.lastHalError = halError;
     canErrorLog.lastTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
 
-    flags = CAN_ERROR_LOG_FLAG_BUS_OFF;
-    
     if (canErrorLog.eventCounter < 0xFFFFFFFFu)
     {
         ++canErrorLog.eventCounter;
     }
 
+    /*
+     * BusOff-счетчик из ТЗ должен расти только при реальном Bus Off.
+     * Раньше сюда насильно подставлялся BUS_OFF, из-за чего любая CAN-ошибка
+     * превращалась в фальшивую запись журнала. Это ломало смысл диагностики.
+     */
     if ((flags & CAN_ERROR_LOG_FLAG_BUS_OFF) != 0u)
     {
         if (canErrorLog.busOffCounter < 0xFFFFu)
@@ -481,6 +496,8 @@ static bool CAN_IsSupportedMsgId(uint16_t msgId)
         case CAN_MSG_WDG_RESET_COUNTER:
         case CAN_MSG_LAST_ERROR_TIMESTAMP:
         case CAN_MSG_LAST_ERROR_CODE:
+        case CAN_MSG_DIAG_LOG_INFO:
+        case CAN_MSG_DIAG_LOG_READ:
             return true;
 
         default:
@@ -496,6 +513,8 @@ static uint8_t CAN_ResponsePriorityForMsgId(uint16_t msgId)
         case CAN_MSG_WDG_RESET_COUNTER:
         case CAN_MSG_LAST_ERROR_TIMESTAMP:
         case CAN_MSG_LAST_ERROR_CODE:
+        case CAN_MSG_DIAG_LOG_INFO:
+        case CAN_MSG_DIAG_LOG_READ:
             return CAN_PRIORITY_DIAGNOSTIC;
 
         default:
@@ -655,6 +674,59 @@ static uint16_t CAN_GetDiagnosticWord(uint16_t msgId)
 static uint8_t CAN_GetResponseDlc(uint16_t msgId)
 {
     return (msgId == CAN_MSG_LAST_ERROR_CODE) ? 4u : 8u;
+}
+
+static void CAN_BuildDiagnosticLogInfoPayload(uint8_t payload[8])
+{
+    DiagnosticLogExportInfo_t info = {0};
+
+    if (payload == NULL)
+    {
+        return;
+    }
+
+    memset(payload, 0, 8u);
+    DiagnosticLog_GetExportInfo(&info);
+
+    /*
+     * MSG_ID=34: короткая сводка для ПК перед выгрузкой журнала.
+     * 0..1 capacity, 2 record_size, 3 chunks, 4..5 valid_count, 6..7 last_index.
+     */
+    CAN_PackWordLE(&payload[0], info.record_capacity);
+    payload[2] = info.record_size_bytes;
+    payload[3] = info.chunks_per_record;
+    CAN_PackWordLE(&payload[4], info.valid_record_count);
+    CAN_PackWordLE(&payload[6], info.last_record_index);
+}
+
+static void CAN_BuildDiagnosticLogReadPayload(const uint8_t *requestData,
+                                              uint8_t requestDlc,
+                                              uint8_t payload[8])
+{
+    uint16_t recordIndex;
+    uint8_t chunkIndex;
+
+    if (payload == NULL)
+    {
+        return;
+    }
+
+    memset(payload, 0xFF, 8u);
+
+    if ((requestData == NULL) || (requestDlc < 3u))
+    {
+        return;
+    }
+
+    recordIndex = (uint16_t)requestData[0] | ((uint16_t)requestData[1] << 8);
+    chunkIndex = requestData[2];
+
+    /*
+     * MSG_ID=35: request[0..1] = физический индекс записи, request[2] = chunk 0..3.
+     * Ответом идут ровно 8 сырых байт записи. Если запрос битый или слот пустой,
+     * оставляем 0xFF, чтобы ПК не принял мусор за валидную запись без проверки CRC.
+     */
+    (void)DiagnosticLog_ReadRecordChunk(recordIndex, chunkIndex, payload);
 }
 
 static void CAN_BuildResponsePayload(uint16_t msgId, uint8_t payload[8])
@@ -841,7 +913,10 @@ bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId,
     return true;
 }
 
-bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan, uint32_t extId)
+bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan,
+                               uint32_t extId,
+                               const uint8_t *requestData,
+                               uint8_t requestDlc)
 {
     uint8_t src = 0u;
     uint8_t dst = 0u;
@@ -862,7 +937,19 @@ bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan, uint32_t extId)
         return false;
     }
 
-    CAN_BuildResponsePayload(msgId, responsePayload);
+    if (msgId == CAN_MSG_DIAG_LOG_INFO)
+    {
+        CAN_BuildDiagnosticLogInfoPayload(responsePayload);
+    }
+    else if (msgId == CAN_MSG_DIAG_LOG_READ)
+    {
+        CAN_BuildDiagnosticLogReadPayload(requestData, requestDlc, responsePayload);
+    }
+    else
+    {
+        CAN_BuildResponsePayload(msgId, responsePayload);
+    }
+
     responseId = CAN_BuildExtId(CAN_NODE_IBP_4K,
                                 CAN_NODE_KOU,
                                 msgId,
