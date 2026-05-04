@@ -97,6 +97,16 @@ DIAG_LOG_SOURCE_DESCRIPTIONS = {
     0x03: "Flash",
 }
 
+DIAG_LOG_RAW_STATUS_DESCRIPTIONS = {
+    "valid": "валидная запись",
+    "erased": "пустой слот / много 0xFF",
+    "bad_magic": "нет magic DLOG",
+    "bad_header": "битый заголовок",
+    "bad_crc": "CRC не сошелся",
+    "timeout": "таймаут ответа",
+    "bad_response": "битый CAN-ответ",
+}
+
 
 @dataclass(frozen=True)
 class RegisterRequestDef:
@@ -241,6 +251,16 @@ class DiagnosticLogRecord:
     raw: bytes
     crc_ok: bool = True
     calculated_crc32: int = 0
+
+
+@dataclass(frozen=True)
+class DiagnosticLogRawRecord:
+    physical_index: int
+    raw: bytes
+    chunks_received: int
+    complete: bool
+    status: str
+    parsed: Optional[DiagnosticLogRecord] = None
 
 
 def build_protocol_can_id(src: int, dst: int, msg_id: int, priority: int = 0) -> int:
@@ -430,7 +450,46 @@ def format_diagnostic_log_record(record: DiagnosticLogRecord) -> list[str]:
     ]
 
 
-def build_diagnostic_log_text(info: DiagnosticLogInfo, records: list[DiagnosticLogRecord]) -> str:
+def format_hex_bytes(data: bytes) -> str:
+    if not data:
+        return "<нет байтов>"
+
+    return " ".join(f"{byte:02X}" for byte in data)
+
+
+def format_diagnostic_log_raw_record(
+    raw_record: DiagnosticLogRawRecord,
+    chunks_per_record: int,
+) -> list[str]:
+    status = DIAG_LOG_RAW_STATUS_DESCRIPTIONS.get(raw_record.status, raw_record.status)
+    parsed = raw_record.parsed
+    crc_text = "нет"
+    sequence_text = "нет"
+
+    if parsed is not None:
+        sequence_text = str(parsed.sequence)
+        crc_text = (
+            "OK"
+            if parsed.crc_ok
+            else f"FAIL (expected 0x{parsed.crc32:08X}, calculated 0x{parsed.calculated_crc32:08X})"
+        )
+
+    return [
+        f"Физический индекс:         {raw_record.physical_index}",
+        f"Статус:                    {status}",
+        f"Получено CAN-чанков:       {raw_record.chunks_received}/{chunks_per_record}",
+        f"Полная запись:             {'да' if raw_record.complete else 'нет'}",
+        f"Sequence:                  {sequence_text}",
+        f"CRC32 check:               {crc_text}",
+        f"Raw:                       {format_hex_bytes(raw_record.raw)}",
+    ]
+
+
+def build_diagnostic_log_text(
+    info: DiagnosticLogInfo,
+    records: list[DiagnosticLogRecord],
+    raw_records: list[DiagnosticLogRawRecord],
+) -> str:
     last_index = (
         "нет"
         if info.last_record_index == DIAG_LOG_INVALID_INDEX
@@ -446,9 +505,20 @@ def build_diagnostic_log_text(info: DiagnosticLogInfo, records: list[DiagnosticL
         f"  Размер записи:           {info.record_size} байт",
         f"  CAN-чанков на запись:    {info.chunks_per_record}",
         f"  Индекс последней записи: {last_index}",
+        f"  Получено сырых записей:  {len(raw_records)}",
+        f"  Расшифровано валидных:   {len(records)}",
         "",
-        "Записи:",
+        "Сырые CAN-данные:",
     ]
+
+    if not raw_records:
+        lines.append("  Сырые записи не получены.")
+    else:
+        for number, raw_record in enumerate(raw_records, start=1):
+            lines.extend(["", "-" * 88, f"Raw запись #{number}"])
+            lines.extend(format_diagnostic_log_raw_record(raw_record, info.chunks_per_record))
+
+    lines.extend(["", "Расшифровка валидных записей:"])
 
     if not records:
         lines.append("  Валидных записей для выгрузки нет.")
@@ -556,6 +626,7 @@ class CandleLightCanClient:
         timeout: float,
         is_extended_id: Optional[bool] = None,
         echo_id: Optional[int] = None,
+        require_echo_before_response: bool = False,
     ) -> Optional[bytes]:
         saw_echo = False
         deadline = time.monotonic() + timeout
@@ -566,6 +637,13 @@ class CandleLightCanClient:
             if is_extended_id is not None and frame.is_extended_id != is_extended_id:
                 continue
             if frame.arbitration_id == expected_id:
+                if require_echo_before_response and echo_id is not None and not saw_echo:
+                    if self.verbose:
+                        print(
+                            f"Ignoring stale pre-echo response 0x{expected_id:08X} "
+                            f"while waiting for TX echo 0x{echo_id:08X}."
+                        )
+                    continue
                 return frame.data
             if echo_id is not None and frame.arbitration_id == echo_id:
                 saw_echo = True
@@ -576,12 +654,16 @@ class CandleLightCanClient:
             )
         return None
 
-    def drain_rx(self, window_s: float = 0.15) -> None:
-        deadline = time.monotonic() + window_s
-        while time.monotonic() < deadline:
+    def drain_rx(self, window_s: float = 0.15, max_s: float = 0.5) -> None:
+        now = time.monotonic()
+        hard_deadline = now + max_s
+        quiet_deadline = now + window_s
+
+        while now < quiet_deadline and now < hard_deadline:
             frame = self.read_frame(timeout_ms=10)
-            if frame is None:
-                return
+            now = time.monotonic()
+            if frame is not None:
+                quiet_deadline = min(now + window_s, hard_deadline)
 
 
 class FirmwareUploader:
@@ -930,6 +1012,7 @@ class DiagnosticLogDumper:
                 timeout=self.request_timeout,
                 is_extended_id=True,
                 echo_id=request_id,
+                require_echo_before_response=True,
             )
             if response is not None:
                 time.sleep(self.pause_s)
@@ -951,23 +1034,70 @@ class DiagnosticLogDumper:
             print(f"Bad log info response: {exc}")
             return None
 
-    def read_record(self, index: int, chunks_per_record: int) -> Optional[DiagnosticLogRecord]:
+    def read_record_raw(self, index: int, chunks_per_record: int) -> DiagnosticLogRawRecord:
         raw = bytearray()
+        chunks_received = 0
 
         # Одна запись во Flash больше одного CAN-кадра, поэтому читаем ее частями по 8 байт.
         for chunk in range(chunks_per_record):
             request = struct.pack("<HB", index & 0xFFFF, chunk & 0xFF)
             payload = self._request_payload(CAN_PROTOCOL_MSG_DIAG_LOG_READ, request)
             if payload is None or len(payload) != DIAG_LOG_RECORD_CHUNK_SIZE:
-                return None
-
-            # Первый чанк содержит magic. Если слот пустой, нет смысла долбить CAN еще тремя запросами.
-            if chunk == 0 and int.from_bytes(payload[:4], "little") != DIAG_LOG_MAGIC:
-                return None
+                if payload is not None:
+                    raw.extend(payload)
+                    chunks_received += 1
+                return DiagnosticLogRawRecord(
+                    physical_index=index,
+                    raw=bytes(raw),
+                    chunks_received=chunks_received,
+                    complete=False,
+                    status="timeout" if payload is None else "bad_response",
+                )
 
             raw.extend(payload)
+            chunks_received += 1
 
-        return parse_diagnostic_log_record(index, bytes(raw))
+            # Первый чанк содержит magic. Если слот пустой или чужой, дальше CAN не долбим.
+            if chunk == 0:
+                if all(byte == 0xFF for byte in payload):
+                    return DiagnosticLogRawRecord(
+                        physical_index=index,
+                        raw=bytes(raw),
+                        chunks_received=chunks_received,
+                        complete=False,
+                        status="erased",
+                    )
+                if int.from_bytes(payload[:4], "little") != DIAG_LOG_MAGIC:
+                    return DiagnosticLogRawRecord(
+                        physical_index=index,
+                        raw=bytes(raw),
+                        chunks_received=chunks_received,
+                        complete=False,
+                        status="bad_magic",
+                    )
+
+        parsed = parse_diagnostic_log_record(index, bytes(raw))
+        if parsed is None:
+            status = "bad_header"
+        elif not parsed.crc_ok:
+            status = "bad_crc"
+        else:
+            status = "valid"
+
+        return DiagnosticLogRawRecord(
+            physical_index=index,
+            raw=bytes(raw),
+            chunks_received=chunks_received,
+            complete=(chunks_received == chunks_per_record),
+            status=status,
+            parsed=parsed,
+        )
+
+    def read_record(self, index: int, chunks_per_record: int) -> Optional[DiagnosticLogRecord]:
+        raw_record = self.read_record_raw(index, chunks_per_record)
+        if raw_record.status == "valid" and raw_record.parsed is not None:
+            return raw_record.parsed
+        return None
 
     def read_records(
         self,
@@ -976,62 +1106,63 @@ class DiagnosticLogDumper:
         index: Optional[int],
         latest: bool,
         limit: Optional[int],
-    ) -> list[DiagnosticLogRecord]:
+    ) -> tuple[list[DiagnosticLogRecord], list[DiagnosticLogRawRecord]]:
+        records: list[DiagnosticLogRecord] = []
+        raw_records: list[DiagnosticLogRawRecord] = []
+
         if index is not None:
-            record = self.read_record(index, info.chunks_per_record)
-            return [record] if record is not None else []
+            raw_record = self.read_record_raw(index, info.chunks_per_record)
+            raw_records.append(raw_record)
+            if raw_record.status == "valid" and raw_record.parsed is not None:
+                records.append(raw_record.parsed)
+            return records, raw_records
 
         if latest:
             if info.last_record_index == DIAG_LOG_INVALID_INDEX:
-                return []
-            record = self.read_record(info.last_record_index, info.chunks_per_record)
-            return [record] if record is not None else []
+                return records, raw_records
+            raw_record = self.read_record_raw(info.last_record_index, info.chunks_per_record)
+            raw_records.append(raw_record)
+            if raw_record.status == "valid" and raw_record.parsed is not None:
+                records.append(raw_record.parsed)
+            return records, raw_records
 
-        target_count = info.valid_count
+        if info.last_record_index == DIAG_LOG_INVALID_INDEX or info.record_capacity <= 0:
+            return records, raw_records
+
+        target_count = info.record_capacity
         if limit is not None:
             target_count = min(target_count, max(0, limit))
         if target_count == 0:
-            return []
+            return records, raw_records
 
-        records: list[DiagnosticLogRecord] = []
-        scanned_indices: set[int] = set()
-
-        if info.last_record_index != DIAG_LOG_INVALID_INDEX:
-            first_index = (info.last_record_index - target_count + 1) % info.record_capacity
-            for offset in range(target_count):
-                physical_index = (first_index + offset) % info.record_capacity
-                scanned_indices.add(physical_index)
-                record = self.read_record(physical_index, info.chunks_per_record)
-                if record is not None:
-                    records.append(record)
-                if len(records) >= target_count:
-                    break
-
-        if len(records) >= target_count:
-            records.sort(key=lambda item: item.sequence)
-            return records
-
-        for physical_index in range(info.record_capacity):
-            if physical_index in scanned_indices:
-                continue
-            if physical_index == 0 or (physical_index + 1) % 256 == 0:
+        physical_index = info.last_record_index
+        for scanned_count in range(target_count):
+            if scanned_count == 0 or (scanned_count + 1) % 256 == 0:
                 print(
-                    "Scanning log slots: "
-                    f"{physical_index + 1}/{info.record_capacity}, "
-                    f"found {len(records)}/{target_count}"
+                    "Reading log slots backward: "
+                    f"{scanned_count + 1}/{target_count}, "
+                    f"index {physical_index}, valid {len(records)}"
                 )
 
-            record = self.read_record(physical_index, info.chunks_per_record)
-            if record is None:
-                continue
+            raw_record = self.read_record_raw(physical_index, info.chunks_per_record)
+            raw_records.append(raw_record)
+            if raw_record.status != "valid" or raw_record.parsed is None:
+                print(
+                    "Log scan stopped at index "
+                    f"{physical_index}: "
+                    f"{DIAG_LOG_RAW_STATUS_DESCRIPTIONS.get(raw_record.status, raw_record.status)}"
+                )
+                break
 
-            records.append(record)
+            records.append(raw_record.parsed)
             if len(records) >= target_count:
                 break
 
+            physical_index = (physical_index - 1) % info.record_capacity
+
         # В txt удобнее видеть журнал по времени записи, а не по физическим слотам кольца.
         records.sort(key=lambda item: item.sequence)
-        return records
+        return records, raw_records
 
     def dump_to_txt(
         self,
@@ -1058,11 +1189,15 @@ class DiagnosticLogDumper:
             )
             return False
 
-        records = self.read_records(info, index=index, latest=latest, limit=limit)
+        records, raw_records = self.read_records(info, index=index, latest=latest, limit=limit)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(build_diagnostic_log_text(info, records), encoding="utf-8")
+        output_path.write_text(
+            build_diagnostic_log_text(info, records, raw_records),
+            encoding="utf-8",
+        )
         print(f"Log txt written: {output_path}")
         print(f"Records written: {len(records)}")
+        print(f"Raw records read: {len(raw_records)}")
         return True
 
 

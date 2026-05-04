@@ -408,9 +408,6 @@ const DiagnosticFlashRecord_t *DiagnosticLog_GetLastRecord(void)
 
 void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info)
 {
-    bool foundLatestRecord = false;
-    uint32_t latestSequence = 0u;
-
     if (info == NULL)
     {
         return;
@@ -428,29 +425,33 @@ void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info)
     info->last_record_index = DIAG_LOG_INVALID_RECORD_INDEX;
 
     /*
-     * Для выгрузки журнала по CAN отдаем не указатель на внутреннее состояние,
-     * а короткую сводку: ПК сам решает, какие физические слоты читать дальше.
+     * Для выгрузки считаем только непрерывную валидную цепочку от последней
+     * записи назад по кольцу. Старые валидные хвосты за пустым/битым слотом
+     * не должны попадать в export, иначе ПК выгребает мусорную историю.
      */
-    for (uint32_t index = 0u; index < DIAG_LOG_RECORD_COUNT; ++index)
+    if (!diagnosticLogHasLastRecord)
     {
+        return;
+    }
+
+    info->last_record_index = (uint16_t)diagnosticLogLastRecordIndex;
+
+    for (uint32_t offset = 0u; offset < DIAG_LOG_RECORD_COUNT; ++offset)
+    {
+        uint32_t index =
+            (diagnosticLogLastRecordIndex + DIAG_LOG_RECORD_COUNT - offset) %
+            DIAG_LOG_RECORD_COUNT;
         const DiagnosticFlashRecord_t *record =
             (const DiagnosticFlashRecord_t *)DiagnosticLog_RecordAddress(index);
 
         if (!DiagnosticLog_IsRecordValid(record))
         {
-            continue;
+            break;
         }
 
         if (info->valid_record_count < 0xFFFFu)
         {
             ++info->valid_record_count;
-        }
-
-        if (!foundLatestRecord || (record->sequence > latestSequence))
-        {
-            foundLatestRecord = true;
-            latestSequence = record->sequence;
-            info->last_record_index = (uint16_t)index;
         }
     }
 }
@@ -481,16 +482,11 @@ bool DiagnosticLog_ReadRecordChunk(uint16_t record_index,
         return false;
     }
 
-    record = (const DiagnosticFlashRecord_t *)DiagnosticLog_RecordAddress(record_index);
-    if (!DiagnosticLog_IsRecordValid(record))
-    {
-        return false;
-    }
-
     /*
-     * Одна запись 32 байта, CAN несет 8 байт. Поэтому запись читается
-     * четырьмя чанками: 0 -> байты 0..7, 1 -> 8..15, 2 -> 16..23, 3 -> 24..31.
+     * Отдаем сырые байты физического слота. Валидность проверяет ПК:
+     * magic/size/CRC решают, попадет запись в расшифровку или только в raw.
      */
+    record = (const DiagnosticFlashRecord_t *)DiagnosticLog_RecordAddress(record_index);
     recordBytes = (const uint8_t *)record;
     byteOffset = (uint32_t)chunk_index * DIAG_LOG_RECORD_CHUNK_SIZE_BYTES;
     memcpy(chunk_data, &recordBytes[byteOffset], DIAG_LOG_RECORD_CHUNK_SIZE_BYTES);

@@ -723,8 +723,8 @@ static void CAN_BuildDiagnosticLogReadPayload(const uint8_t *requestData,
 
     /*
      * MSG_ID=35: request[0..1] = физический индекс записи, request[2] = chunk 0..3.
-     * Ответом идут ровно 8 сырых байт записи. Если запрос битый или слот пустой,
-     * оставляем 0xFF, чтобы ПК не принял мусор за валидную запись без проверки CRC.
+     * Ответом идут ровно 8 сырых байт физического слота. Если запрос битый,
+     * оставляем 0xFF; пустой слот сам выглядит как 0xFF.
      */
     (void)DiagnosticLog_ReadRecordChunk(recordIndex, chunkIndex, payload);
 }
