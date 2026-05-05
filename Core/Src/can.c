@@ -154,38 +154,77 @@ static uint32_t CAN_BuildErrorLogFlags(uint32_t halError);
 static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags);
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData);
 
-static void CAN_RecordStartupResetFlags(void)
+static uint32_t CAN_GetStartupResetFlags(void)
 {
-    bool watchdogResetDetected = false;
-    uint32_t resetDetail = 0u;
+    uint32_t resetFlags = 0u;
+
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST) != RESET)
+    {
+        resetFlags |= DIAG_LOG_RESET_FLAG_BOR;
+    }
+
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST) != RESET)
+    {
+        resetFlags |= DIAG_LOG_RESET_FLAG_PIN;
+    }
+
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) != RESET)
+    {
+        resetFlags |= DIAG_LOG_RESET_FLAG_POR;
+    }
+
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) != RESET)
+    {
+        resetFlags |= DIAG_LOG_RESET_FLAG_SOFTWARE;
+    }
 
     if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET)
     {
-        watchdogResetDetected = true;
-        resetDetail |= 0x01u;
+        resetFlags |= DIAG_LOG_RESET_FLAG_IWDG;
     }
 
     if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) != RESET)
     {
-        watchdogResetDetected = true;
-        resetDetail |= 0x02u;
+        resetFlags |= DIAG_LOG_RESET_FLAG_WWDG;
     }
 
-    if (watchdogResetDetected)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST) != RESET)
     {
+        resetFlags |= DIAG_LOG_RESET_FLAG_LOW_POWER;
+    }
+
+    return resetFlags;
+}
+
+static void CAN_RecordStartupResetFlags(void)
+{
+    uint32_t resetFlags = CAN_GetStartupResetFlags();
+    uint32_t resetDetail = RCC->CSR;
+    uint8_t resetErrorCode = DIAG_LOG_ERROR_STARTUP_RESET;
+
+    if (resetFlags == 0u)
+    {
+        __HAL_RCC_CLEAR_RESET_FLAGS();
+        return;
+    }
+
+    if ((resetFlags & (DIAG_LOG_RESET_FLAG_IWDG | DIAG_LOG_RESET_FLAG_WWDG)) != 0u)
+    {
+        resetErrorCode = DIAG_LOG_ERROR_WDG_RESET;
+
         if (wdgResetCounter < 0xFFFFu)
         {
             ++wdgResetCounter;
         }
-
-        CAN_RecordErrorCode(DIAG_LOG_ERROR_WDG_RESET);
-        (void)CAN_WriteDiagnosticLogEvent(DIAG_LOG_ERROR_WDG_RESET,
-                                          DIAG_LOG_EVENT_ERROR,
-                                          DIAG_LOG_CHANNEL_GLOBAL,
-                                          DIAG_LOG_SOURCE_WDG,
-                                          0u,
-                                          resetDetail);
     }
+
+    CAN_RecordErrorCode(resetErrorCode);
+    (void)CAN_WriteDiagnosticLogEvent(resetErrorCode,
+                                      DIAG_LOG_EVENT_ERROR,
+                                      DIAG_LOG_CHANNEL_GLOBAL,
+                                      DIAG_LOG_SOURCE_RESET,
+                                      resetFlags,
+                                      resetDetail);
 
     __HAL_RCC_CLEAR_RESET_FLAGS();
 }

@@ -29,12 +29,13 @@
  */
 #define DIAG_LOG_MAGIC                   0x474F4C44UL
 
-/* Коды ошибок из ТЗ, таблица 4.10. */
+/* Коды ошибок журнала: 0x00..0x04 из ТЗ, 0x05 добавлен для фиксации старта после reset. */
 #define DIAG_LOG_ERROR_NONE              0x00u
 #define DIAG_LOG_ERROR_CAN_BUS_OFF       0x01u
 #define DIAG_LOG_ERROR_WDG_RESET         0x02u
 #define DIAG_LOG_ERROR_FLASH_CRC         0x03u
 #define DIAG_LOG_ERROR_FLASH_WRITE       0x04u
+#define DIAG_LOG_ERROR_STARTUP_RESET     0x05u
 
 /* Тип события: сейчас пишем именно факт возникновения диагностической ошибки. */
 #define DIAG_LOG_EVENT_ERROR             0x01u
@@ -46,6 +47,16 @@
 #define DIAG_LOG_SOURCE_CAN              0x01u
 #define DIAG_LOG_SOURCE_WDG              0x02u
 #define DIAG_LOG_SOURCE_FLASH            0x03u
+#define DIAG_LOG_SOURCE_RESET            0x04u
+
+/* flags для DIAG_LOG_SOURCE_RESET: нормализованные RCC reset flags на момент старта. */
+#define DIAG_LOG_RESET_FLAG_BOR          (1UL << 0)
+#define DIAG_LOG_RESET_FLAG_PIN          (1UL << 1)
+#define DIAG_LOG_RESET_FLAG_POR          (1UL << 2)
+#define DIAG_LOG_RESET_FLAG_SOFTWARE     (1UL << 3)
+#define DIAG_LOG_RESET_FLAG_IWDG         (1UL << 4)
+#define DIAG_LOG_RESET_FLAG_WWDG         (1UL << 5)
+#define DIAG_LOG_RESET_FLAG_LOW_POWER    (1UL << 6)
 
 /*
  * Одна запись занимает ровно 32 байта. Поля сгруппированы по размеру, чтобы

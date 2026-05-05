@@ -70,6 +70,25 @@ DIAG_LOG_RECORD_SIZE = 32
 DIAG_LOG_RECORD_CHUNK_SIZE = 8
 DIAG_LOG_INVALID_INDEX = 0xFFFF
 DIAG_LOG_RECORD_STRUCT = struct.Struct("<IIIIHHHHBBBBI")
+DIAG_LOG_ERROR_WDG_RESET = 0x02
+DIAG_LOG_ERROR_STARTUP_RESET = 0x05
+DIAG_LOG_SOURCE_WDG = 0x02
+DIAG_LOG_SOURCE_RESET = 0x04
+
+DIAG_LOG_RESET_FLAG_BITS = (
+    (0, "BORRST: brown-out/POR/PDR"),
+    (1, "PINRST: NRST/external reset pin"),
+    (2, "PORRST: power-on/power-down reset"),
+    (3, "SFTRST: software reset"),
+    (4, "IWDGRST: Independent Watchdog reset"),
+    (5, "WWDGRST: Window Watchdog reset"),
+    (6, "LPWRRST: low-power reset"),
+)
+
+DIAG_LOG_LEGACY_WDG_DETAIL_BITS = (
+    (0, "IWDGRST: Independent Watchdog reset"),
+    (1, "WWDGRST: Window Watchdog reset"),
+)
 
 ERROR_FLAG_BITS = (
     (0, "BQ_ERROR"),
@@ -82,9 +101,10 @@ ERROR_FLAG_BITS = (
 LAST_ERROR_CODE_DESCRIPTIONS = {
     0x00: "Ошибок не зарегистрировано",
     0x01: "Переход CAN-контроллера в состояние Bus Off",
-    0x02: "Сброс по Independent Watchdog (IWDG)",
+    0x02: "Сброс по watchdog (IWDG/WWDG)",
     0x03: "Ошибка контрольной суммы диагностических данных в Flash",
     0x04: "Ошибка записи в Flash",
+    0x05: "Сброс/перезапуск MCU, зафиксированный на старте",
 }
 
 DIAG_LOG_EVENT_DESCRIPTIONS = {
@@ -95,6 +115,7 @@ DIAG_LOG_SOURCE_DESCRIPTIONS = {
     0x01: "CAN",
     0x02: "Watchdog",
     0x03: "Flash",
+    0x04: "Reset/RCC",
 }
 
 DIAG_LOG_RAW_STATUS_DESCRIPTIONS = {
@@ -417,6 +438,52 @@ def format_diagnostic_log_channel(channel: int) -> str:
     return f"неизвестный канал 0x{channel:02X}"
 
 
+def format_named_bitmask(value: int, bit_descriptions: Sequence[tuple[int, str]]) -> str:
+    active = [name for bit, name in bit_descriptions if value & (1 << bit)]
+    if not active:
+        return f"0x{value:08X} (нет активных известных битов)"
+    return f"0x{value:08X} ({'; '.join(active)})"
+
+
+def format_reset_summary(reset_flags: int) -> str:
+    reasons: list[str] = []
+
+    if reset_flags & ((1 << 4) | (1 << 5)):
+        reasons.append("watchdog reset")
+    if reset_flags & (1 << 3):
+        reasons.append("software reset")
+    if reset_flags & ((1 << 0) | (1 << 2)):
+        reasons.append("power/brown-out reset")
+    if reset_flags & (1 << 1):
+        reasons.append("NRST/external reset pin flag")
+    if reset_flags & (1 << 6):
+        reasons.append("low-power reset")
+
+    if not reasons:
+        return "неизвестная причина по нормализованным флагам"
+    return "; ".join(reasons)
+
+
+def format_diagnostic_log_reset_details(record: DiagnosticLogRecord) -> list[str]:
+    if record.source == DIAG_LOG_SOURCE_RESET:
+        return [
+            f"Reset flags decoded:       {format_named_bitmask(record.flags, DIAG_LOG_RESET_FLAG_BITS)}",
+            f"Reset reason summary:      {format_reset_summary(record.flags)}",
+            f"Reset detail source:       raw RCC->CSR before __HAL_RCC_CLEAR_RESET_FLAGS()",
+        ]
+
+    if (
+        record.source == DIAG_LOG_SOURCE_WDG
+        and record.error_code == DIAG_LOG_ERROR_WDG_RESET
+        and record.flags == 0
+    ):
+        return [
+            f"Legacy WDG detail decoded: {format_named_bitmask(record.detail, DIAG_LOG_LEGACY_WDG_DETAIL_BITS)}",
+        ]
+
+    return []
+
+
 def format_diagnostic_log_record(record: DiagnosticLogRecord) -> list[str]:
     error_description = LAST_ERROR_CODE_DESCRIPTIONS.get(
         record.error_code,
@@ -431,7 +498,7 @@ def format_diagnostic_log_record(record: DiagnosticLogRecord) -> list[str]:
         f"неизвестный источник 0x{record.source:02X}",
     )
 
-    return [
+    lines = [
         f"Физический индекс:         {record.physical_index}",
         f"Sequence:                  {record.sequence}",
         f"Код ошибки:                0x{record.error_code:02X} ({error_description})",
@@ -443,11 +510,15 @@ def format_diagnostic_log_record(record: DiagnosticLogRecord) -> list[str]:
         f"WDG Reset Counter:         {record.wdg_reset_counter}",
         f"Flags:                     0x{record.flags:08X}",
         f"Detail:                    0x{record.detail:08X}",
+    ]
+    lines.extend(format_diagnostic_log_reset_details(record))
+    lines.extend([
         f"CRC32:                     0x{record.crc32:08X}",
         f"CRC32 calculated:          0x{record.calculated_crc32:08X}",
         f"CRC32 check:               {'OK' if record.crc_ok else 'FAIL (STM32 запись отдала, но PC-проверка не сошлась)'}",
         f"Raw:                       {' '.join(f'{byte:02X}' for byte in record.raw)}",
-    ]
+    ])
+    return lines
 
 
 def format_hex_bytes(data: bytes) -> str:
