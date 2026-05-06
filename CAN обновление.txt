@@ -1,10 +1,46 @@
 Обновление через CAN происходит в следующем формате:
 
-1) список CAN ID для обновления 
-	CAN_FLAG_SLAVE_OS = 0x4E1 - Отсылается мастером, при получении этой команды stm32 стирает сектора для ОС баттарейного блока
-	CAN_SLAVE_OS = 0x4E2 - с этим CAN ID
-	CAN_ACK_BLOCK = 0x4E3
-	CAN_FLAG_MASTER_OS = 0x4E4
-	CAN_MASTER_OS = 0x4E5
+Актуальный протокол обновления использует extended CAN ID:
+SRC[0..6], DST[7..13], MSG_ID[14..23], PRIORITY[27..28].
+Запросы обновления идут SRC=1 (КОУ) -> DST=20 (IBP-4k), PRIORITY=0.
+
+MSG_ID команд обновления:
+	CAN_MSG_FW_SLAVE_BEGIN = 40 - начало приема slave-образа в staging flash IBP-4k
+	CAN_MSG_FW_SLAVE_DATA = 41 - передача DATA-пакетов slave-образа
+	CAN_MSG_FW_ACK = 42 - ACK от IBP-4k
+	CAN_MSG_FW_MASTER_BEGIN = 43 - начало приема master-образа в staging flash IBP-4k
+	CAN_MSG_FW_MASTER_DATA = 44 - передача DATA-пакетов master-образа
+	CAN_MSG_FW_SLAVE_UPDATE_START = 45 - запуск рассылки уже сохраненного slave-образа ведомым контроллерам
+
+BEGIN-пакет:
+	Data[0..1] = totalBlocks, uint16 big-endian.
+	Data[2..5] = imageSizeBytes, uint32 big-endian, если DLC >= 6.
+	Если размер не передан, IBP-4k оценивает размер как totalBlocks * 60.
+	Тип образа выбирается по размеру: FLASH_APP_SIZE -> master, меньше FLASH_APP_SIZE в допустимых пределах -> slave.
+
+DATA-пакет:
+	Data[0..1] = globalPacketIndex, uint16 big-endian.
+	Data[2..7] = до 6 байт данных прошивки.
+	10 DATA-пакетов образуют один transport-блок 60 байт.
+	После записи блока IBP-4k отправляет ACK с номером записанного блока:
+		Data[0..1] = blockNumber, uint16 big-endian.
+
+CAN_MSG_FW_SLAVE_UPDATE_START - это не прием образа.
+Эта команда запускает прошивку slave-контроллеров образом, который уже был принят по CAN, проверен по CRC и сохранен в staging flash IBP-4k.
+
+Формат CAN_MSG_FW_SLAVE_UPDATE_START:
+	DLC = 0:
+		обновить всех подключенных сейчас slave.
+	DLC >= 1:
+		Data[0] = slave_num.
+		slave_num < UART_CHANNEL_COUNT:
+			обновить только указанный slave-канал.
+		slave_num >= UART_CHANNEL_COUNT, обычно 0xFF:
+			обновить всех подключенных slave.
+
+Важно:
+	"Всех" означает всех slave, у которых сейчас есть валидная Modbus-связь.
+	Рассылка всем идет очередью по одному slave, не параллельно.
+	Если SLAVE_AUTO_UPDATE_ENABLE = 1, после успешного приема slave-образа IBP-4k сам ставит в очередь обновление всех подключенных slave.
 
 

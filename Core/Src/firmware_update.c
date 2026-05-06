@@ -633,7 +633,7 @@ bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canData, uint
         case CAN_MSG_FW_MASTER_BEGIN:
         {
             /*
-             * BEGIN master/slave теперь обрабатываются одинаково.
+             * BEGIN master/slave обрабатываются одинаково.
              *
              * Принцип:
              * 1. читаем размер и число блоков;
@@ -641,11 +641,6 @@ bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canData, uint
              * 3. стираем общий staging-слот;
              * 4. очищаем metadata до NONE;
              * 5. запускаем новый активный сеанс приёма.
-             *
-             * Почему так:
-             * - физическая область хранения одна;
-             * - старый образ должен исчезнуть до начала нового приёма;
-             * - metadata не должны врать, если новый приём оборвётся посередине.
              */
             uint16_t totalBlocks = 0u;
             uint32_t imageSizeBytes = 0u;
