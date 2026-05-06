@@ -14,6 +14,7 @@ extern CAN_HandleTypeDef hcan1;
 static volatile uint16_t wdgResetCounter = 0u;
 static volatile uint16_t lastErrorTimestampHours = 0u;
 static volatile uint8_t lastErrorCode = 0u;
+static uint16_t latchedBalanceFlags[UART_CHANNEL_COUNT] = {0u};
 
 typedef struct
 {
@@ -467,8 +468,6 @@ static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
 
     /*
      * BusOff-счетчик из ТЗ должен расти только при реальном Bus Off.
-     * Раньше сюда насильно подставлялся BUS_OFF, из-за чего любая CAN-ошибка
-     * превращалась в фальшивую запись журнала. Это ломало смысл диагностики.
      */
     if ((flags & CAN_ERROR_LOG_FLAG_BUS_OFF) != 0u)
     {
@@ -605,6 +604,7 @@ static uint16_t CAN_ComposeErrorFlags(uint8_t channelIndex)
     const ModbusSlaveData_t *data;
     uint16_t flags = 0u;
     uint16_t balanceDeltaMv;
+    uint16_t balanceFlags;
 
     if (channelIndex >= UART_CHANNEL_COUNT)
     {
@@ -614,7 +614,7 @@ static uint16_t CAN_ComposeErrorFlags(uint8_t channelIndex)
     data = &modbusSlaveData[channelIndex];
     if (!data->valid)
     {
-        return CAN_ERROR_FLAG_COMM_ERROR;
+        return (uint16_t)(CAN_ERROR_FLAG_COMM_ERROR | latchedBalanceFlags[channelIndex]);
     }
 
     flags = (uint16_t)(data->error_flags & (CAN_ERROR_FLAG_BQ_ERROR | CAN_ERROR_FLAG_INA_ERROR));
@@ -622,18 +622,29 @@ static uint16_t CAN_ComposeErrorFlags(uint8_t channelIndex)
 
     if (data->soc_percent == 100u)
     {
+        balanceFlags = 0u;
+
         if (balanceDeltaMv >= CAN_BALANCE_WARNING_THRESHOLD_MV)
         {
-            flags |= CAN_ERROR_FLAG_BALANCE_WARNING;
+            balanceFlags |= CAN_ERROR_FLAG_BALANCE_WARNING;
         }
 
         if (balanceDeltaMv > CAN_BALANCE_CRITICAL_THRESHOLD_MV)
         {
-            flags |= CAN_ERROR_FLAG_BALANCE_CRITICAL;
+            balanceFlags |= CAN_ERROR_FLAG_BALANCE_CRITICAL;
+        }
+
+        if (balanceFlags != 0u)
+        {
+            latchedBalanceFlags[channelIndex] |= balanceFlags;
+        }
+        else
+        {
+            latchedBalanceFlags[channelIndex] = 0u;
         }
     }
 
-    return flags;
+    return (uint16_t)(flags | latchedBalanceFlags[channelIndex]);
 }
 
 static uint16_t CAN_GetUnavailableWord(void)
