@@ -76,7 +76,7 @@ typedef struct
 #define CAN_MSG_DIAG_LOG_INFO           34U
 #define CAN_MSG_DIAG_LOG_READ           35U
 
-#define CAN_PRIORITY_DEFAULT            0U
+#define CAN_PRIORITY_DEFAULT            1U
 #define CAN_PRIORITY_DIAGNOSTIC         3U
 
 /* ERROR_FLAGS bits according to the specification */
@@ -102,18 +102,32 @@ extern CanErrorLog_t canErrorLog;
 extern uint8_t CanlocalData[8];
 
 void MX_CAN1_Init(void);
+
+/* Собирает extended CAN ID из источника, получателя, msgId и приоритета. */
 uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priority);
+
+/* Разбирает extended CAN ID на поля адресации, сообщения и приоритета. */
 bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId, uint8_t *priority);
+
+/* Обрабатывает CAN-запрос регистров и отправляет соответствующий ответ. */
 bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan,
                                uint32_t extId,
                                const uint8_t *requestData,
                                uint8_t requestDlc);
+
+/* Извлекает следующий принятый CAN-кадр из очереди приемника. */
 bool CAN_DequeueReceivedFrame(CAN_RxHeaderTypeDef *header, uint8_t *data, uint8_t *dlc);
+
+/* Отправляет extended CAN-кадр из прикладных модулей. */
 void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
                            uint32_t extId,
                            const uint8_t *data,
                            uint8_t dlc);
+
+/* Регистрирует ошибку записи flash в диагностическом журнале. */
 void CAN_ReportFlashWriteError(void);
+
+/* Выполняет отложенную запись диагностического события из RAM-очереди. */
 void CAN_ProcessPendingDiagnosticLog(void);
 
 #endif /* CAN_H */

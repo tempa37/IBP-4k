@@ -42,6 +42,7 @@ uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length)
   return crc;
 }
 
+/* Формирует Modbus RTU-запрос чтения holding-регистров для указанного slave-адреса. */
 bool Modbus_PrepareReadRequest(ModbusChannelBuffer_t *buffer,
                                uint16_t startRegister,
                                uint16_t registerCount,
@@ -76,6 +77,7 @@ bool Modbus_PrepareReadRequest(ModbusChannelBuffer_t *buffer,
   return true;
 }
 
+/* Сохраняет принятый Modbus-ответ в буфер канала с ограничением по размеру кадра. */
 bool Modbus_SaveResponse(ModbusChannelBuffer_t *buffer,
                          const uint8_t *data,
                          size_t length)
@@ -96,6 +98,7 @@ bool Modbus_SaveResponse(ModbusChannelBuffer_t *buffer,
   return true;
 }
 
+/* Проверяет Modbus-ответ чтения и извлекает из него регистры в big-endian порядке. */
 bool Modbus_DecodeRegisters(const ModbusChannelBuffer_t *buffer,
                             uint16_t *outRegisters,
                             size_t registerCount)
@@ -153,6 +156,7 @@ bool Modbus_DecodeRegisters(const ModbusChannelBuffer_t *buffer,
 
 
 
+/* Отправляет команду записи одного Modbus-регистра в выбранный батарейный блок. */
 int Modbus_WriteRegister(uint16_t reg_addr, uint16_t data, uint8_t battery_block)
 {
   

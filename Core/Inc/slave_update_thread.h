@@ -22,10 +22,6 @@ extern "C" {
 
 /*
  * Профиль прошиваемого slave: ST STM32L051C6.
- *
- * Это не карта flash master-контроллера. Нельзя, блядь, брать сюда
- * FLASH_APP_START_ADDR от STM32F427, иначе ROM bootloader L051 закономерно
- * отвечает NACK на адрес 0x08040000.
  */
 #define SLAVE_FLASH_TARGET_START_ADDR     0x08000000UL
 #define SLAVE_FLASH_TARGET_SIZE_BYTES     (32u * 1024u)
@@ -160,13 +156,28 @@ extern SlaveSystem_t slave;
 extern volatile SlaveUpdateDebugInfo_t g_slave_update_debug;
 extern volatile SlaveUpdateTraceEntry_t g_slave_update_trace[SLAVE_UPDATE_TRACE_DEPTH];
 
+/* Выполняет один шаг автомата прошивки ведомых контроллеров. */
 void Slave_UpdateProcess(void);
+
+/* Основная FreeRTOS-задача фоновой прошивки ведомых контроллеров. */
 void Slave_UpdateTask(void const *argument);
+
+/* Проверяет, идет ли прошивка указанного ведомого канала. */
 bool Slave_IsUpdateActive(uint8_t slave_num);
+
+/* Проверяет, есть ли активная или ожидающая slave-прошивка. */
 bool Slave_IsAnyUpdateRunning(void);
+
+/* Запрашивает прошивку одного ведомого канала. */
 bool Slave_RequestSingleUpdate(uint8_t slave_num);
+
+/* Запрашивает прошивку всех сейчас подключенных ведомых каналов. */
 bool Slave_RequestConnectedUpdate(void);
+
+/* Ставит автозапуск прошивки подключенных каналов после приема образа. */
 bool Slave_RequestAutoConnectedUpdate(void);
+
+/* Отменяет ожидающие и активные прошивки ведомых контроллеров. */
 void Slave_CancelPendingUpdates(void);
 
 #ifdef __cplusplus

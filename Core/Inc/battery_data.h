@@ -42,7 +42,10 @@ typedef struct
 
 extern ModbusSlaveData_t modbusSlaveData[];
 
+/* Парсит Modbus-ответ батареи и заполняет структуру измерений канала. */
 bool ParseModbusResponse(const uint8_t *response, size_t length, ModbusSlaveData_t *data_out);
+
+/* Сбрасывает признак валидной связи, если канал давно не обновлялся. */
 void CheckConnectionTimeout(void);
 
 #ifdef __cplusplus

@@ -1036,7 +1036,7 @@ HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef *hcan, const CAN_Filter
 HAL_StatusTypeDef HAL_CAN_Start(CAN_HandleTypeDef *hcan)
 {
   uint32_t tickstart;
-
+  volatile uint32_t tt = 0;
   if (hcan->State == HAL_CAN_STATE_READY)
   {
     /* Change CAN peripheral state */
@@ -1051,8 +1051,10 @@ HAL_StatusTypeDef HAL_CAN_Start(CAN_HandleTypeDef *hcan)
     /* Wait the acknowledge */
     while ((hcan->Instance->MSR & CAN_MSR_INAK) != 0U)
     {
+      tt = HAL_GetTick();
+      tt = tt - tickstart;
       /* Check for the Timeout */
-      if ((HAL_GetTick() - tickstart) > CAN_TIMEOUT_VALUE)
+      if ( tt > CAN_TIMEOUT_VALUE)
       {
         /* Update error code */
         hcan->ErrorCode |= HAL_CAN_ERROR_TIMEOUT;

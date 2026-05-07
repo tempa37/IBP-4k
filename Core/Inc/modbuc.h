@@ -33,6 +33,7 @@ typedef struct
   size_t responseLength;                    /* Длина последнего ответа */
 } ModbusChannelBuffer_t;
 
+/* Считает контрольную сумму Modbus CRC16 для буфера данных. */
 uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length);
 
 
@@ -43,15 +44,18 @@ uint16_t Modbus_CalculateCRC(const uint8_t *data, size_t length);
 
 
 
+/* Формирует Modbus RTU-запрос чтения holding-регистров. */
 bool Modbus_PrepareReadRequest(ModbusChannelBuffer_t *buffer,
                                uint16_t startRegister,
                                uint16_t registerCount,
                                uint8_t slaveAddress);
 
+/* Сохраняет принятый Modbus-ответ в буфер канала. */
 bool Modbus_SaveResponse(ModbusChannelBuffer_t *buffer,
                          const uint8_t *data,
                          size_t length);
 
+/* Проверяет Modbus-ответ и извлекает регистры в выходной массив. */
 bool Modbus_DecodeRegisters(const ModbusChannelBuffer_t *buffer,
                             uint16_t *outRegisters,
                             size_t registerCount);

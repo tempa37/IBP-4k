@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+/* Основная задача прикладной обработки принятых CAN-кадров. */
 void CanService_Task(void const *argument);
 
 #ifdef __cplusplus

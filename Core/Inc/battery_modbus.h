@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+/* Основная задача фонового UART/Modbus-опроса батарейных блоков. */
 void BatteryModbus_Task(void const *argument);
 
 #ifdef __cplusplus

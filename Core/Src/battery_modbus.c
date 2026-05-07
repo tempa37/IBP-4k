@@ -44,16 +44,19 @@ static uint32_t modbusRequestTick = 0u;
 static uint32_t modbusNextPollTick = 0u;
 static bool modbusAwaitingResponse = false;
 
+/* Возвращает следующий UART-канал для циклического опроса батарей. */
 static uint8_t BatteryModbus_NextChannel(uint8_t channelIndex)
 {
     return (uint8_t)((channelIndex + 1u) % UART_CHANNEL_COUNT);
 }
 
+/* Проверяет достижение таймера с учетом переполнения счетчика HAL_GetTick(). */
 static bool BatteryModbus_TimeReached(uint32_t currentTick, uint32_t targetTick)
 {
     return ((int32_t)(currentTick - targetTick) >= 0);
 }
 
+/* Записывает отладочную информацию о последней ошибке Modbus-опроса канала. */
 static void BatteryModbus_LogError(uint8_t channelIndex, uint32_t reason, uint32_t detail)
 {
     if (channelIndex >= UART_CHANNEL_COUNT)
@@ -68,6 +71,7 @@ static void BatteryModbus_LogError(uint8_t channelIndex, uint32_t reason, uint32
                              (detail & 0xFFu);
 }
 
+/* Очищает признак и длину ожидающего UART-кадра в контексте канала. */
 static void BatteryModbus_ClearPendingFrame(UartContext_t *context)
 {
     if (context == NULL)
@@ -81,6 +85,7 @@ static void BatteryModbus_ClearPendingFrame(UartContext_t *context)
     taskEXIT_CRITICAL();
 }
 
+/* Завершает обработку канала и планирует время следующего Modbus-опроса. */
 static void BatteryModbus_FinishChannel(uint8_t channelIndex, uint32_t currentTick)
 {
     uint32_t elapsed;
@@ -128,6 +133,7 @@ static size_t BatteryModbus_TakeReceivedFrame(UartContext_t *context, uint8_t *l
     return length;
 }
 
+/* Формирует и отправляет Modbus-запрос чтения регистров в выбранный UART-канал. */
 static bool BatteryModbus_SendReadRequest(uint8_t channelIndex,
                                           UartContext_t *context,
                                           ModbusChannelBuffer_t *modbusBuffer,
@@ -187,6 +193,7 @@ static bool BatteryModbus_SendReadRequest(uint8_t channelIndex,
     return true;
 }
 
+/* Запускает первичный запрос или повторную попытку опроса батарейного канала. */
 static void BatteryModbus_StartOrRetryChannel(uint8_t channelIndex, uint32_t currentTick)
 {
     UartContext_t *context;
@@ -217,6 +224,7 @@ static void BatteryModbus_StartOrRetryChannel(uint8_t channelIndex, uint32_t cur
     }
 }
 
+/* Обрабатывает неудачную попытку обмена и решает, нужен ли повтор или отказ канала. */
 static void BatteryModbus_FailAttempt(uint8_t channelIndex,
                                       uint32_t reason,
                                       uint32_t detail,
@@ -242,6 +250,7 @@ static void BatteryModbus_FailAttempt(uint8_t channelIndex,
     BatteryModbus_FinishChannel(channelIndex, currentTick);
 }
 
+/* Переносит аппаратную ошибку UART в состояние Modbus-опроса выбранного канала. */
 static void BatteryModbus_HandleHardwareError(uint8_t channelIndex,
                                               UartContext_t *context,
                                               uint32_t currentTick)
@@ -342,6 +351,7 @@ static void BatteryModbus_ProcessFrameResult(uint8_t channelIndex,
     }
 }
 
+/* Планирует очередной Modbus-опрос и контролирует таймаут ожидаемого ответа. */
 static void BatteryModbus_PollScheduler(uint32_t currentTick)
 {
     if (modbusAwaitingResponse)

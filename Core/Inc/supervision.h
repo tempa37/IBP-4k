@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+/* Основная задача обслуживания watchdog, IPS-входов и таймаутов связи. */
 void Supervision_Task(void const *argument);
 
 #ifdef __cplusplus

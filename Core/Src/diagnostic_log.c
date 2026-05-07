@@ -19,6 +19,7 @@ static bool diagnosticLogHasLastRecord = false;
 static DiagnosticFlashRecord_t diagnosticLogLastRecord = {0};
 static DiagnosticLogCounters_t diagnosticLogCounters = {0};
 
+/* Считает CRC32 записи диагностического журнала по байтовому буферу. */
 static uint32_t DiagnosticLog_CalcCrc32(const uint8_t *data, uint32_t length)
 {
     uint32_t crc = 0xFFFFFFFFUL;
@@ -45,11 +46,13 @@ static uint32_t DiagnosticLog_CalcCrc32(const uint8_t *data, uint32_t length)
     return crc ^ 0xFFFFFFFFUL;
 }
 
+/* Возвращает flash-адрес физического слота журнала по его индексу. */
 static uint32_t DiagnosticLog_RecordAddress(uint32_t index)
 {
     return DIAG_LOG_START_ADDR + (index * DIAG_LOG_RECORD_SIZE_BYTES);
 }
 
+/* Проверяет, что заданный диапазон flash полностью стерт в состояние 0xFF. */
 static bool DiagnosticLog_IsRangeErased(uint32_t address, uint32_t length)
 {
     const uint32_t *word = (const uint32_t *)address;
@@ -66,12 +69,14 @@ static bool DiagnosticLog_IsRangeErased(uint32_t address, uint32_t length)
     return true;
 }
 
+/* Проверяет, свободен ли конкретный слот записи диагностического журнала. */
 static bool DiagnosticLog_IsSlotErased(uint32_t index)
 {
     return DiagnosticLog_IsRangeErased(DiagnosticLog_RecordAddress(index),
                                        DIAG_LOG_RECORD_SIZE_BYTES);
 }
 
+/* Проверяет, стерт ли сектор flash, используемый половиной кольцевого журнала. */
 static bool DiagnosticLog_IsSectorErased(uint32_t sectorIndex)
 {
     uint32_t sectorAddress = DIAG_LOG_START_ADDR + (sectorIndex * DIAG_LOG_SECTOR_SIZE_BYTES);
@@ -79,26 +84,31 @@ static bool DiagnosticLog_IsSectorErased(uint32_t sectorIndex)
     return DiagnosticLog_IsRangeErased(sectorAddress, DIAG_LOG_SECTOR_SIZE_BYTES);
 }
 
+/* Определяет индекс flash-сектора, которому принадлежит запись журнала. */
 static uint32_t DiagnosticLog_SectorIndexForRecord(uint32_t recordIndex)
 {
     return recordIndex / DIAG_LOG_SECTOR_RECORD_COUNT;
 }
 
+/* Возвращает индекс первого слота внутри выбранного сектора журнала. */
 static uint32_t DiagnosticLog_FirstRecordIndexOfSector(uint32_t sectorIndex)
 {
     return sectorIndex * DIAG_LOG_SECTOR_RECORD_COUNT;
 }
 
+/* Возвращает первый слот следующего сектора кольцевого flash-журнала. */
 static uint32_t DiagnosticLog_NextSectorFirstRecord(uint32_t sectorIndex)
 {
     return DiagnosticLog_FirstRecordIndexOfSector((sectorIndex + 1u) % 2u);
 }
 
+/* Вычисляет следующий sequence-номер записи с обходом запрещенного 0xFFFFFFFF. */
 static uint32_t DiagnosticLog_NextSequenceValue(uint32_t sequence)
 {
     return (sequence == 0xFFFFFFFFUL) ? 1u : (sequence + 1u);
 }
 
+/* Проверяет magic и размер заголовка flash-записи журнала. */
 static bool DiagnosticLog_IsRecordHeaderValid(const DiagnosticFlashRecord_t *record)
 {
     if (record == NULL)
@@ -110,6 +120,7 @@ static bool DiagnosticLog_IsRecordHeaderValid(const DiagnosticFlashRecord_t *rec
             (record->size == (uint16_t)sizeof(DiagnosticFlashRecord_t)));
 }
 
+/* Проверяет полную валидность записи журнала, включая CRC32. */
 static bool DiagnosticLog_IsRecordValid(const DiagnosticFlashRecord_t *record)
 {
     uint32_t calculatedCrc;
@@ -125,6 +136,7 @@ static bool DiagnosticLog_IsRecordValid(const DiagnosticFlashRecord_t *record)
     return (calculatedCrc == record->crc32);
 }
 
+/* Переносит найденную flash-запись в RAM-состояние последнего события и счетчиков. */
 static void DiagnosticLog_LoadRecordToRuntimeState(uint32_t recordIndex,
                                                    const DiagnosticFlashRecord_t *record)
 {
@@ -137,6 +149,7 @@ static void DiagnosticLog_LoadRecordToRuntimeState(uint32_t recordIndex,
     diagnosticLogCounters.last_error_code = record->error_code;
 }
 
+/* Находит последний записанный слот внутри сектора бинарным поиском по пустым слотам. */
 static bool DiagnosticLog_FindLastWrittenIndexInSector(uint32_t sectorIndex,
                                                        uint32_t *recordIndex)
 {
@@ -173,6 +186,7 @@ static bool DiagnosticLog_FindLastWrittenIndexInSector(uint32_t sectorIndex,
     return true;
 }
 
+/* Выбирает следующий слот для записи с учетом кольца и битых хвостов сектора. */
 static uint32_t DiagnosticLog_SelectNextIndex(uint32_t latestIndex)
 {
     uint32_t candidate = (latestIndex + 1u) % DIAG_LOG_RECORD_COUNT;
@@ -192,6 +206,7 @@ static uint32_t DiagnosticLog_SelectNextIndex(uint32_t latestIndex)
     return candidate;
 }
 
+/* Стирает flash-сектор, который используется выбранной половиной журнала. */
 static HAL_StatusTypeDef DiagnosticLog_EraseSector(uint32_t sectorIndex)
 {
     FLASH_EraseInitTypeDef eraseInit = {0};
@@ -210,6 +225,7 @@ static HAL_StatusTypeDef DiagnosticLog_EraseSector(uint32_t sectorIndex)
     return status;
 }
 
+/* Подготавливает слот к записи, стирая сектор при входе в новый круг или битый слот. */
 static HAL_StatusTypeDef DiagnosticLog_PrepareSlot(uint32_t recordIndex)
 {
     uint32_t sectorIndex = DiagnosticLog_SectorIndexForRecord(recordIndex);
@@ -237,6 +253,7 @@ static HAL_StatusTypeDef DiagnosticLog_PrepareSlot(uint32_t recordIndex)
     return HAL_OK;
 }
 
+/* Записывает одну 32-байтную запись журнала во flash по словам. */
 static HAL_StatusTypeDef DiagnosticLog_WriteRecord(uint32_t address,
                                                    const DiagnosticFlashRecord_t *record)
 {
@@ -261,6 +278,7 @@ static HAL_StatusTypeDef DiagnosticLog_WriteRecord(uint32_t address,
     return status;
 }
 
+/* Сканирует flash-журнал при старте и восстанавливает RAM-состояние диагностики. */
 void DiagnosticLog_Init(void)
 {
     bool foundRecord = false;
@@ -351,6 +369,7 @@ void DiagnosticLog_Init(void)
     diagnosticLogInitialized = true;
 }
 
+/* Возвращает признак обнаруженной CRC-ошибки при чтении диагностического журнала. */
 bool DiagnosticLog_HadCrcError(void)
 {
     if (!diagnosticLogInitialized)
@@ -361,6 +380,7 @@ bool DiagnosticLog_HadCrcError(void)
     return diagnosticLogCrcErrorDetected;
 }
 
+/* Повторно проверяет CRC последней известной записи диагностического журнала. */
 bool DiagnosticLog_CheckLastRecordCrc(void)
 {
     const DiagnosticFlashRecord_t *record;
@@ -381,6 +401,7 @@ bool DiagnosticLog_CheckLastRecordCrc(void)
     return valid;
 }
 
+/* Возвращает сохраненные диагностические счетчики CAN, watchdog и последней ошибки. */
 void DiagnosticLog_GetCounters(DiagnosticLogCounters_t *counters)
 {
     if (counters == NULL)
@@ -396,6 +417,7 @@ void DiagnosticLog_GetCounters(DiagnosticLogCounters_t *counters)
     *counters = diagnosticLogCounters;
 }
 
+/* Возвращает указатель на RAM-копию последней валидной записи журнала. */
 const DiagnosticFlashRecord_t *DiagnosticLog_GetLastRecord(void)
 {
     if (!diagnosticLogInitialized)
@@ -406,6 +428,7 @@ const DiagnosticFlashRecord_t *DiagnosticLog_GetLastRecord(void)
     return &diagnosticLogLastRecord;
 }
 
+/* Формирует информацию о доступном диапазоне выгрузки диагностического журнала. */
 void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info)
 {
     if (info == NULL)
@@ -427,7 +450,7 @@ void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info)
     /*
      * Для выгрузки считаем только непрерывную валидную цепочку от последней
      * записи назад по кольцу. Старые валидные хвосты за пустым/битым слотом
-     * не должны попадать в export, иначе ПК выгребает мусорную историю.
+     * не должны попадать в export
      */
     if (!diagnosticLogHasLastRecord)
     {
@@ -456,6 +479,7 @@ void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info)
     }
 }
 
+/* Читает один 8-байтный фрагмент физической записи журнала для CAN-выгрузки. */
 bool DiagnosticLog_ReadRecordChunk(uint16_t record_index,
                                    uint8_t chunk_index,
                                    uint8_t chunk_data[DIAG_LOG_RECORD_CHUNK_SIZE_BYTES])
@@ -482,10 +506,9 @@ bool DiagnosticLog_ReadRecordChunk(uint16_t record_index,
         return false;
     }
 
-    /*
-     * Отдаем сырые байты физического слота. Валидность проверяет ПК:
-     * magic/size/CRC решают, попадет запись в расшифровку или только в raw.
-     */
+    /*STM32 валидирует журнал для своей runtime-логики, но CAN-выгрузка
+      намеренно отдает raw-байты, а принимающая сторона уже решает,
+      как их интерпретировать.*/
     record = (const DiagnosticFlashRecord_t *)DiagnosticLog_RecordAddress(record_index);
     recordBytes = (const uint8_t *)record;
     byteOffset = (uint32_t)chunk_index * DIAG_LOG_RECORD_CHUNK_SIZE_BYTES;
@@ -494,6 +517,7 @@ bool DiagnosticLog_ReadRecordChunk(uint16_t record_index,
     return true;
 }
 
+/* Добавляет новое диагностическое событие в кольцевой flash-журнал. */
 HAL_StatusTypeDef DiagnosticLog_RecordEvent(uint8_t error_code,
                                             uint8_t event_type,
                                             uint8_t channel,

@@ -95,8 +95,13 @@ extern volatile uint32_t storedImageType;
 extern volatile uint32_t storedImageSize;
 extern volatile uint32_t storedUpdateFlag;
 
+/* Загружает из flash сведения о принятом firmware-образе. */
 void FW_LoadStoredImageInfo(void);
+
+/* Обрабатывает входящую extended CAN-команду протокола обновления прошивки. */
 bool FW_HandleExtendedUpdateCommand(uint32_t extId, const uint8_t *canData, uint8_t dataLength);
+
+/* Фиксирует готовность master-образа к применению после перезапуска. */
 HAL_StatusTypeDef Set_Update_Flag(uint32_t imageSizeBytes);
 
 #ifdef __cplusplus

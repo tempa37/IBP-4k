@@ -85,6 +85,28 @@ void StartTask04(void const * argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+void my_Delay(uint32_t delay_ms)
+{
+  uint32_t loopsPerMs = SystemCoreClock / 8000u;
+
+  if (loopsPerMs == 0u)
+  {
+    loopsPerMs = 1u;
+  }
+
+  while (delay_ms > 0u)
+  {
+    volatile uint32_t loops = loopsPerMs;
+
+    while (loops > 0u)
+    {
+      __NOP();
+      --loops;
+    }
+
+    --delay_ms;
+  }
+}
 
 /**
   * @brief  Точка входа приложения: инициализирует HAL, периферию и задачи RTOS.
@@ -137,8 +159,11 @@ int main(void)
   
 
   /* Инициализируем UART-контексты, mutex-ы и прием до запуска scheduler. */
+  my_Delay(100);
   UART_Init();
+  my_Delay(100);
   UART_CreateMutexes();
+  my_Delay(100);
   UART_StartAllReceptions();
 
   /* USER CODE END 2 */
@@ -154,7 +179,9 @@ int main(void)
   /* USER CODE BEGIN RTOS_TIMERS */
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
-
+//#if CAN_ENABLE == 1
+//  MX_CAN1_Init();
+//#endif
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */

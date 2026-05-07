@@ -101,16 +101,30 @@ typedef struct
     uint8_t chunks_per_record;      /* Сколько 8-байтных CAN-ответов нужно для выгрузки одной записи. */
 } DiagnosticLogExportInfo_t;
 
+/* Инициализирует RAM-состояние диагностического журнала по содержимому flash. */
 void DiagnosticLog_Init(void);
+
+/* Возвращает признак найденной CRC-ошибки в журнале. */
 bool DiagnosticLog_HadCrcError(void);
+
+/* Проверяет CRC последней сохраненной записи журнала. */
 bool DiagnosticLog_CheckLastRecordCrc(void);
+
+/* Возвращает сохраненные диагностические счетчики. */
 void DiagnosticLog_GetCounters(DiagnosticLogCounters_t *counters);
+
+/* Возвращает RAM-копию последней валидной записи журнала. */
 const DiagnosticFlashRecord_t *DiagnosticLog_GetLastRecord(void);
+
+/* Формирует сведения для выгрузки журнала по CAN. */
 void DiagnosticLog_GetExportInfo(DiagnosticLogExportInfo_t *info);
+
+/* Читает 8-байтный фрагмент записи журнала для передачи по CAN. */
 bool DiagnosticLog_ReadRecordChunk(uint16_t record_index,
                                    uint8_t chunk_index,
                                    uint8_t chunk_data[DIAG_LOG_RECORD_CHUNK_SIZE_BYTES]);
 
+/* Добавляет новое событие в кольцевой flash-журнал диагностики. */
 HAL_StatusTypeDef DiagnosticLog_RecordEvent(uint8_t error_code,
                                             uint8_t event_type,
                                             uint8_t channel,

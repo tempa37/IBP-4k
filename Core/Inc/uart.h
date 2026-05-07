@@ -60,12 +60,25 @@ extern volatile uint32_t uart_debug_error_count;
 extern volatile uint8_t uart_debug_error_uart;
 
 /* Функции UART */
+/* Инициализирует прикладные UART-контексты. */
 void UART_Init(void);
+
+/* Создает mutex-ы для синхронизации доступа к UART-каналам. */
 void UART_CreateMutexes(void);
+
+/* Запускает прием данных на всех используемых UART. */
 void UART_StartAllReceptions(void);
+
+/* Возвращает прикладной UART-контекст по HAL handle. */
 UartContext_t *Uart_GetContext(UART_HandleTypeDef *handle);
+
+/* Перезапускает прием данных для выбранного UART-контекста. */
 void Uart_StartReception(UartContext_t *context);
+
+/* Проверяет состояние UART и выполняет восстановление при ошибке. */
 void Uart_CheckAndRecover(UartContext_t *ctx);
+
+/* Выполняет общее восстановление UART после зафиксированной ошибки. */
 void Uart_ErrorRecovery(void);
 
 /* Инициализация UART */

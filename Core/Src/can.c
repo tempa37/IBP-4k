@@ -62,11 +62,13 @@ static const uint16_t canFirmwareMsgIds[] =
     CAN_MSG_FW_SLAVE_UPDATE_START
 };
 
+/* Преобразует расширенный CAN ID в формат регистров аппаратного фильтра STM32. */
 static uint32_t CAN_FilterEncodeExtendedId(uint32_t extId)
 {
     return (extId << 3) | CAN_ID_EXT;
 }
 
+/* Настраивает один банк CAN-фильтра на два заранее закодированных extended ID. */
 static HAL_StatusTypeDef CAN_ConfigFilterBank(uint8_t bank, uint32_t encodedId1, uint32_t encodedId2)
 {
     CAN_FilterTypeDef filter = {0};
@@ -85,6 +87,7 @@ static HAL_StatusTypeDef CAN_ConfigFilterBank(uint8_t bank, uint32_t encodedId1,
     return HAL_CAN_ConfigFilter(&hcan1, &filter);
 }
 
+/* Настраивает аппаратные CAN-фильтры для прикладных запросов и команд обновления. */
 static HAL_StatusTypeDef CAN_ConfigHardwareFilters(void)
 {
     volatile uint32_t fr1 = 0;
@@ -155,6 +158,7 @@ static uint32_t CAN_BuildErrorLogFlags(uint32_t halError);
 static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags);
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData);
 
+/* Считывает флаги причины последнего сброса MCU в формат диагностического журнала. */
 static uint32_t CAN_GetStartupResetFlags(void)
 {
     uint32_t resetFlags = 0u;
@@ -197,6 +201,7 @@ static uint32_t CAN_GetStartupResetFlags(void)
     return resetFlags;
 }
 
+/* Фиксирует причину старта в диагностике и очищает RCC reset-флаги. */
 static void CAN_RecordStartupResetFlags(void)
 {
     uint32_t resetFlags = CAN_GetStartupResetFlags();
@@ -230,12 +235,14 @@ static void CAN_RecordStartupResetFlags(void)
     __HAL_RCC_CLEAR_RESET_FLAGS();
 }
 
+/* Обновляет последний код ошибки и временную метку для диагностических ответов. */
 static void CAN_RecordErrorCode(uint8_t errorCodeValue)
 {
     lastErrorCode = errorCodeValue;
     lastErrorTimestampHours = (uint16_t)(HAL_GetTick() / 3600000u);
 }
 
+/* Записывает событие диагностики с текущими счетчиками CAN и watchdog. */
 static HAL_StatusTypeDef CAN_WriteDiagnosticLogEvent(uint8_t errorCode,
                                                      uint8_t eventType,
                                                      uint8_t channel,
@@ -254,6 +261,7 @@ static HAL_StatusTypeDef CAN_WriteDiagnosticLogEvent(uint8_t errorCode,
                                                wdgResetCounter);
 }
 
+/* Записывает событие диагностики с уже зафиксированным снимком счетчиков. */
 static HAL_StatusTypeDef CAN_WriteDiagnosticLogEventSnapshot(uint8_t errorCode,
                                                              uint8_t eventType,
                                                              uint8_t channel,
@@ -283,6 +291,7 @@ static HAL_StatusTypeDef CAN_WriteDiagnosticLogEventSnapshot(uint8_t errorCode,
     return status;
 }
 
+/* Проверяет CRC последней записи журнала и при необходимости логирует ошибку flash. */
 static void CAN_CheckLastDiagnosticLogRecord(uint8_t sourceErrorCode)
 {
     HAL_StatusTypeDef status;
@@ -314,6 +323,7 @@ static void CAN_CheckLastDiagnosticLogRecord(uint8_t sourceErrorCode)
     }
 }
 
+/* Кладет диагностическое событие в RAM-очередь для последующей записи вне прерывания. */
 static void CAN_QueueDiagnosticLogEvent(uint8_t errorCode,
                                         uint8_t eventType,
                                         uint8_t channel,
@@ -338,6 +348,7 @@ static void CAN_QueueDiagnosticLogEvent(uint8_t errorCode,
     pendingDiagnosticLog.pending = true;
 }
 
+/* Загружает сохраненные счетчики диагностики из flash-журнала в RAM-состояние CAN. */
 static void CAN_LoadPersistentDiagnostics(void)
 {
     DiagnosticLogCounters_t counters = {0};
@@ -351,6 +362,7 @@ static void CAN_LoadPersistentDiagnostics(void)
     lastErrorCode = counters.last_error_code;
 }
 
+/* Преобразует битовую маску ошибок HAL CAN в прикладные флаги журнала ошибок. */
 static uint32_t CAN_BuildErrorLogFlags(uint32_t halError)
 {
     uint32_t flags = 0u;
@@ -449,6 +461,7 @@ static uint32_t CAN_BuildErrorLogFlags(uint32_t halError)
     return flags;
 }
 
+/* Обновляет RAM-журнал CAN-ошибок и ставит BusOff-событие в диагностику. */
 static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
 {
     if ((halError == HAL_CAN_ERROR_NONE) && (flags == 0u))
@@ -486,6 +499,7 @@ static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
     }
 }
 
+/* Помещает принятый CAN-кадр в кольцевую очередь из контекста прерывания. */
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData)
 {
     uint8_t head;
@@ -517,6 +531,7 @@ static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uin
     canContext.dataReady = true;
 }
 
+/* Проверяет, относится ли msgId к поддержанным запросам регистров и диагностики. */
 static bool CAN_IsSupportedMsgId(uint16_t msgId)
 {
     switch (msgId)
@@ -543,6 +558,7 @@ static bool CAN_IsSupportedMsgId(uint16_t msgId)
     }
 }
 
+/* Выбирает приоритет ответного CAN-кадра по типу запрошенного сообщения. */
 static uint8_t CAN_ResponsePriorityForMsgId(uint16_t msgId)
 {
     switch (msgId)
@@ -560,6 +576,7 @@ static uint8_t CAN_ResponsePriorityForMsgId(uint16_t msgId)
     }
 }
 
+/* Укладывает 16-битное значение в payload CAN-ответа в little-endian формате. */
 static void CAN_PackWordLE(uint8_t *dst, uint16_t value)
 {
     if (dst == NULL)
@@ -571,6 +588,7 @@ static void CAN_PackWordLE(uint8_t *dst, uint16_t value)
     dst[1] = (uint8_t)(value >> 8);
 }
 
+/* Рассчитывает разброс напряжений ячеек батареи для диагностики балансировки. */
 static uint16_t CAN_GetBalanceDeltaMv(const ModbusSlaveData_t *data)
 {
     uint16_t minCell = 0xFFFFu;
@@ -599,6 +617,7 @@ static uint16_t CAN_GetBalanceDeltaMv(const ModbusSlaveData_t *data)
     return (uint16_t)(maxCell - minCell);
 }
 
+/* Собирает итоговое слово ошибок батарейного канала для CAN-регистра. */
 static uint16_t CAN_ComposeErrorFlags(uint8_t channelIndex)
 {
     const ModbusSlaveData_t *data;
@@ -647,11 +666,13 @@ static uint16_t CAN_ComposeErrorFlags(uint8_t channelIndex)
     return (uint16_t)(flags | latchedBalanceFlags[channelIndex]);
 }
 
+/* Возвращает маркер недоступного 16-битного значения для CAN-ответов. */
 static uint16_t CAN_GetUnavailableWord(void)
 {
     return 0xFFFFu;
 }
 
+/* Возвращает одно 16-битное значение регистра для выбранного батарейного канала. */
 static uint16_t CAN_GetRegisterResponseWord(uint8_t channelIndex, uint16_t msgId)
 {
     const ModbusSlaveData_t *data;
@@ -703,6 +724,7 @@ static uint16_t CAN_GetRegisterResponseWord(uint8_t channelIndex, uint16_t msgId
     }
 }
 
+/* Возвращает одно диагностическое 16-битное значение для CAN-ответа. */
 static uint16_t CAN_GetDiagnosticWord(uint16_t msgId)
 {
     switch (msgId)
@@ -721,11 +743,13 @@ static uint16_t CAN_GetDiagnosticWord(uint16_t msgId)
     }
 }
 
+/* Определяет длину ответного payload для запрошенного CAN-сообщения. */
 static uint8_t CAN_GetResponseDlc(uint16_t msgId)
 {
     return (msgId == CAN_MSG_LAST_ERROR_CODE) ? 4u : 8u;
 }
 
+/* Формирует краткую сводку параметров flash-журнала диагностики для ПК. */
 static void CAN_BuildDiagnosticLogInfoPayload(uint8_t payload[8])
 {
     DiagnosticLogExportInfo_t info = {0};
@@ -749,6 +773,7 @@ static void CAN_BuildDiagnosticLogInfoPayload(uint8_t payload[8])
     CAN_PackWordLE(&payload[6], info.last_record_index);
 }
 
+/* Формирует payload чтения одного 8-байтного фрагмента записи диагностического журнала. */
 static void CAN_BuildDiagnosticLogReadPayload(const uint8_t *requestData,
                                               uint8_t requestDlc,
                                               uint8_t payload[8])
@@ -779,6 +804,7 @@ static void CAN_BuildDiagnosticLogReadPayload(const uint8_t *requestData,
     (void)DiagnosticLog_ReadRecordChunk(recordIndex, chunkIndex, payload);
 }
 
+/* Собирает стандартный 8-байтный payload ответа на регистровый CAN-запрос. */
 static void CAN_BuildResponsePayload(uint16_t msgId, uint8_t payload[8])
 {
     if (payload == NULL)
@@ -819,6 +845,7 @@ static void CAN_BuildResponsePayload(uint16_t msgId, uint8_t payload[8])
     }
 }
 
+/* Отправляет один extended CAN-кадр с защитой общего TX-доступа mutex-ом. */
 static void CAN_SendFrame(CAN_HandleTypeDef *hcan,
                           uint32_t extId,
                           const uint8_t *data,
@@ -875,13 +902,14 @@ static void CAN_SendFrame(CAN_HandleTypeDef *hcan,
 
 void MX_CAN1_Init(void)
 {
+    
     CAN_LoadPersistentDiagnostics();
     CAN_RecordStartupResetFlags();
 
     __HAL_RCC_CAN1_FORCE_RESET();
-    HAL_Delay(10);
+    my_Delay(10);
     __HAL_RCC_CAN1_RELEASE_RESET();
-    HAL_Delay(10);
+    my_Delay(10);
 
     hcan1.Instance = CAN1;
     hcan1.Init.Prescaler = 5;
@@ -900,13 +928,13 @@ void MX_CAN1_Init(void)
     {
         Error_Handler();
     }
-
+    
     canContext.mutex = osMutexCreate(osMutex(CANBufferMutex));
     if (canContext.mutex == NULL)
     {
         Error_Handler();
     }
-
+    my_Delay(100);
     if (CAN_ConfigHardwareFilters() != HAL_OK)
     {
         Error_Handler();
@@ -930,6 +958,7 @@ void MX_CAN1_Init(void)
     }
 }
 
+/* Собирает extended CAN ID из адресов узлов, идентификатора сообщения и приоритета. */
 uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priority)
 {
     return (((uint32_t)src & 0x7Fu) |
@@ -938,6 +967,7 @@ uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priori
             (((uint32_t)priority & 0x03u) << 27));
 }
 
+/* Разбирает extended CAN ID на источник, получателя, msgId и приоритет. */
 bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId, uint8_t *priority)
 {
     if (src != NULL)
@@ -963,6 +993,7 @@ bool CAN_ParseExtId(uint32_t canId, uint8_t *src, uint8_t *dst, uint16_t *msgId,
     return true;
 }
 
+/* Обрабатывает входящий CAN-запрос регистров и отправляет ответ KOU. */
 bool CAN_HandleRegisterRequest(CAN_HandleTypeDef *hcan,
                                uint32_t extId,
                                const uint8_t *requestData,
@@ -1078,6 +1109,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
     }
 }
 
+/* Забирает следующий принятый CAN-кадр из кольцевой очереди для обработки задачей. */
 bool CAN_DequeueReceivedFrame(CAN_RxHeaderTypeDef *header, uint8_t *data, uint8_t *dlc)
 {
     bool hasFrame = false;
@@ -1106,6 +1138,7 @@ bool CAN_DequeueReceivedFrame(CAN_RxHeaderTypeDef *header, uint8_t *data, uint8_
     return hasFrame;
 }
 
+/* Публичная обертка отправки extended CAN-кадра для остальных модулей приложения. */
 void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
                            uint32_t extId,
                            const uint8_t *data,
@@ -1114,6 +1147,7 @@ void CAN_SendExtendedFrame(CAN_HandleTypeDef *hcan,
     CAN_SendFrame(hcan, extId, data, dlc);
 }
 
+/* Записывает в диагностику прикладную ошибку записи flash. */
 void CAN_ReportFlashWriteError(void)
 {
     CAN_RecordErrorCode(DIAG_LOG_ERROR_FLASH_WRITE);
@@ -1125,6 +1159,7 @@ void CAN_ReportFlashWriteError(void)
                                       HAL_FLASH_GetError());
 }
 
+/* Выполняет отложенную запись диагностического события, поставленного из ISR. */
 void CAN_ProcessPendingDiagnosticLog(void)
 {
     bool hasPendingEvent = false;
