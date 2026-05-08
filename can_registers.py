@@ -48,14 +48,15 @@ CAN_PROTOCOL_MSG_FW_MASTER_BEGIN = 43
 CAN_PROTOCOL_MSG_FW_MASTER_DATA = 44
 CAN_PROTOCOL_MSG_FW_SLAVE_UPDATE_START = 45
 
-CAN_PROTOCOL_PRIORITY_DEFAULT = 0
+CAN_PROTOCOL_PRIORITY_DEFAULT = 1
 CAN_PROTOCOL_PRIORITY_DIAGNOSTIC = 3
 
 DEFAULT_CAN_BITRATE = 250000
 
 TIMEOUT_INIT = 10.0
-TIMEOUT_ACK = 1.5
+TIMEOUT_ACK = 3.0
 MAX_RETRIES = 3
+DEFAULT_UPLOAD_PACKET_GAP_MS = 2
 
 DEFAULT_REQUEST_TIMEOUT = 2.0
 DEFAULT_REQUEST_ATTEMPTS = 5
@@ -297,12 +298,17 @@ def build_protocol_can_id(src: int, dst: int, msg_id: int, priority: int = 0) ->
     return src | (dst << 7) | (msg_id << 14) | (priority << 27)
 
 
-def build_update_can_id(src: int, dst: int, msg_id: int) -> int:
+def build_update_can_id(
+    src: int,
+    dst: int,
+    msg_id: int,
+    priority: int = CAN_PROTOCOL_PRIORITY_DEFAULT,
+) -> int:
     return build_protocol_can_id(
         src=src,
         dst=dst,
         msg_id=msg_id,
-        priority=CAN_PROTOCOL_PRIORITY_DEFAULT,
+        priority=priority,
     )
 
 
@@ -725,6 +731,16 @@ class CandleLightCanClient:
             )
         return None
 
+    def pump_rx(self, duration_s: float) -> None:
+        if duration_s <= 0.0:
+            return
+
+        deadline = time.monotonic() + duration_s
+        while time.monotonic() < deadline:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            timeout_ms = max(1, min(remaining_ms, 10))
+            self.read_frame(timeout_ms=timeout_ms)
+
     def drain_rx(self, window_s: float = 0.15, max_s: float = 0.5) -> None:
         now = time.monotonic()
         hard_deadline = now + max_s
@@ -745,25 +761,32 @@ class FirmwareUploader:
         slave_num: int = 0,
         src_addr: int = CAN_PROTOCOL_ADDR_KOU,
         dst_addr: int = CAN_PROTOCOL_ADDR_IBP4K,
+        priority: int = CAN_PROTOCOL_PRIORITY_DEFAULT,
+        ack_timeout: float = TIMEOUT_ACK,
+        packet_gap_ms: int = DEFAULT_UPLOAD_PACKET_GAP_MS,
     ):
         self.client = client
         self.verbose = verbose
         self.slave_num = slave_num
         self.src_addr = src_addr
         self.dst_addr = dst_addr
+        self.priority = priority
+        self.ack_timeout = max(0.1, ack_timeout)
+        self.packet_gap_s = max(0.0, packet_gap_ms / 1000.0)
         self.firmware: Optional[bytes] = None
         self.is_master = False
         self.total_blocks = 0
         self.sent_blocks = 0
 
     def _command_id(self, msg_id: int) -> int:
-        return build_update_can_id(self.src_addr, self.dst_addr, msg_id)
+        return build_update_can_id(self.src_addr, self.dst_addr, msg_id, self.priority)
 
     def _ack_id(self) -> int:
         return build_update_can_id(
             self.dst_addr,
             self.src_addr,
             CAN_PROTOCOL_MSG_FW_ACK,
+            self.priority,
         )
 
     def load_firmware(self, path: Path, is_master: bool) -> bool:
@@ -859,9 +882,10 @@ class FirmwareUploader:
                     return False
                 time.sleep(0.02)
 
-            time.sleep(0.02)
+            if packet_num + 1 < FW_BLOCK_SIZE_PACKETS:
+                self.client.pump_rx(self.packet_gap_s)
 
-        response = self.client.wait_for_id(ack_id, TIMEOUT_ACK, is_extended_id=True)
+        response = self.client.wait_for_id(ack_id, self.ack_timeout, is_extended_id=True)
         if response is None or len(response) < 2:
             print(f"ACK timeout for block #{block_num}.")
             return False
@@ -1407,6 +1431,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Slave number for the post-upload restart command.",
     )
+    upload_parser.add_argument(
+        "--priority",
+        type=int,
+        default=CAN_PROTOCOL_PRIORITY_DEFAULT,
+        help="CAN priority field for update frames.",
+    )
+    upload_parser.add_argument(
+        "--ack-timeout",
+        type=float,
+        default=TIMEOUT_ACK,
+        help="Timeout in seconds while waiting for a firmware block ACK.",
+    )
+    upload_parser.add_argument(
+        "--packet-gap-ms",
+        type=int,
+        default=DEFAULT_UPLOAD_PACKET_GAP_MS,
+        help="Delay between firmware DATA frames; RX is drained during this delay.",
+    )
 
     return parser
 
@@ -1477,6 +1519,9 @@ def run_upload(args: argparse.Namespace) -> int:
     if not args.firmware.exists():
         print(f"Firmware file does not exist: {args.firmware}")
         return 1
+    if not (0 <= args.priority <= 3):
+        print("--priority must be in range 0..3.")
+        return 1
 
     verbose = not args.quiet
     client = CandleLightCanClient(bitrate=args.bitrate, verbose=verbose)
@@ -1490,6 +1535,9 @@ def run_upload(args: argparse.Namespace) -> int:
             slave_num=args.slave_num,
             src_addr=args.src,
             dst_addr=args.dst,
+            priority=args.priority,
+            ack_timeout=args.ack_timeout,
+            packet_gap_ms=args.packet_gap_ms,
         )
         if not uploader.load_firmware(args.firmware, is_master=args.master):
             return 1
