@@ -102,6 +102,8 @@ extern CanErrorLog_t canErrorLog;
 extern uint8_t CanlocalData[8];
 
 void MX_CAN1_Init(void);
+void CAN_CreateMutex(void);
+void CAN_ProcessStartRetry(void);
 
 /* Собирает extended CAN ID из источника, получателя, msgId и приоритета. */
 uint32_t CAN_BuildExtId(uint8_t src, uint8_t dst, uint16_t msgId, uint8_t priority);

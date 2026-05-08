@@ -32,6 +32,11 @@ typedef struct
 
 static CanPendingDiagnosticLog_t pendingDiagnosticLog = {0};
 
+#define CAN_START_RETRY_INTERVAL_MS 3000u
+
+static volatile bool canHardwareStarted = false;
+static uint32_t canLastStartAttemptTick = 0u;
+
 osMutexDef(CANBufferMutex);
 
 static const uint16_t canRequestMsgIds[] =
@@ -156,6 +161,8 @@ static void CAN_QueueDiagnosticLogEvent(uint8_t errorCode,
                                         uint32_t detail);
 static uint32_t CAN_BuildErrorLogFlags(uint32_t halError);
 static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags);
+static void CAN_RecordStartFailure(uint32_t halError, uint32_t fallbackFlags);
+static HAL_StatusTypeDef CAN_StartHardware(void);
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData);
 
 /* Считывает флаги причины последнего сброса MCU в формат диагностического журнала. */
@@ -499,7 +506,78 @@ static void CAN_RecordErrorLog(uint32_t halError, uint32_t flags)
     }
 }
 
-/* Помещает принятый CAN-кадр в кольцевую очередь из контекста прерывания. */
+/* Records CAN start/retry failures in RAM diagnostics. */
+static void CAN_RecordStartFailure(uint32_t halError, uint32_t fallbackFlags)
+{
+    uint32_t flags = CAN_BuildErrorLogFlags(halError);
+
+    if (flags == 0u)
+    {
+        flags = fallbackFlags;
+    }
+
+    if (halError == HAL_CAN_ERROR_NONE)
+    {
+        halError = HAL_CAN_ERROR_INTERNAL;
+    }
+
+    CAN_RecordErrorLog(halError, flags);
+    canContext.errorCode = halError;
+    canContext.errorDetected = true;
+    canContext.dataReady = false;
+    canContext.rxHead = 0u;
+    canContext.rxTail = 0u;
+    memset(canContext.rxQueue, 0, sizeof(canContext.rxQueue));
+    lastProcessedCanError = halError;
+    lastProcessedCanId = 0u;
+    lastProcessedCanDlc = 0u;
+}
+
+static HAL_StatusTypeDef CAN_StartHardware(void)
+{
+    HAL_StatusTypeDef status;
+
+    status = HAL_CAN_Init(&hcan1);
+    if (status != HAL_OK)
+    {
+        CAN_RecordStartFailure(hcan1.ErrorCode, CAN_ERROR_LOG_FLAG_HAL_STATE);
+        return status;
+    }
+
+    status = CAN_ConfigHardwareFilters();
+    if (status != HAL_OK)
+    {
+        CAN_RecordStartFailure(HAL_CAN_ERROR_PARAM, CAN_ERROR_LOG_FLAG_PARAM);
+        return status;
+    }
+
+    status = HAL_CAN_Start(&hcan1);
+    if (status != HAL_OK)
+    {
+        CAN_RecordStartFailure(hcan1.ErrorCode,
+                               CAN_ERROR_LOG_FLAG_TIMEOUT | CAN_ERROR_LOG_FLAG_HAL_STATE);
+        return status;
+    }
+
+    status = HAL_CAN_ActivateNotification(&hcan1,
+                                          CAN_IT_RX_FIFO0_MSG_PENDING |
+                                          CAN_IT_TX_MAILBOX_EMPTY |
+                                          CAN_IT_ERROR_WARNING |
+                                          CAN_IT_ERROR_PASSIVE |
+                                          CAN_IT_BUSOFF |
+                                          CAN_IT_LAST_ERROR_CODE |
+                                          CAN_IT_ERROR);
+    if (status != HAL_OK)
+    {
+        canHardwareStarted = false;
+        CAN_RecordStartFailure(hcan1.ErrorCode, CAN_ERROR_LOG_FLAG_INTERNAL);
+        return status;
+    }
+
+    canHardwareStarted = true;
+    return HAL_OK;
+}
+
 static void CAN_QueueRxFrameFromIsr(const CAN_RxHeaderTypeDef *header, const uint8_t *frameData)
 {
     uint8_t head;
@@ -907,9 +985,9 @@ void MX_CAN1_Init(void)
     CAN_RecordStartupResetFlags();
 
     __HAL_RCC_CAN1_FORCE_RESET();
-    my_Delay(10);
+    HAL_Delay(10);
     __HAL_RCC_CAN1_RELEASE_RESET();
-    my_Delay(10);
+    HAL_Delay(10);
 
     hcan1.Instance = CAN1;
     hcan1.Init.Prescaler = 5;
@@ -924,37 +1002,50 @@ void MX_CAN1_Init(void)
     hcan1.Init.ReceiveFifoLocked = DISABLE;
     hcan1.Init.TransmitFifoPriority = DISABLE;
 
-    if (HAL_CAN_Init(&hcan1) != HAL_OK)
+    HAL_Delay(100);
+
+    canLastStartAttemptTick = HAL_GetTick();
+    if (CAN_StartHardware() != HAL_OK)
     {
-        Error_Handler();
+        canHardwareStarted = false;
     }
-    
+}
+
+/* Создает CAN TX mutex после запуска scheduler, чтобы не маскировать HAL tick во время инициализации. */
+void CAN_CreateMutex(void)
+{
+    if (canContext.mutex != NULL)
+    {
+        return;
+    }
+
     canContext.mutex = osMutexCreate(osMutex(CANBufferMutex));
     if (canContext.mutex == NULL)
     {
         Error_Handler();
     }
-    my_Delay(100);
-    if (CAN_ConfigHardwareFilters() != HAL_OK)
+}
+
+/* Retries CAN hardware start periodically until the bus leaves init mode. */
+void CAN_ProcessStartRetry(void)
+{
+    uint32_t currentTick;
+
+    if (canHardwareStarted)
     {
-        Error_Handler();
+        return;
     }
 
-    if (HAL_CAN_Start(&hcan1) != HAL_OK)
+    currentTick = HAL_GetTick();
+    if ((currentTick - canLastStartAttemptTick) < CAN_START_RETRY_INTERVAL_MS)
     {
-        Error_Handler();
+        return;
     }
 
-    if (HAL_CAN_ActivateNotification(&hcan1,
-                                     CAN_IT_RX_FIFO0_MSG_PENDING |
-                                     CAN_IT_TX_MAILBOX_EMPTY |
-                                     CAN_IT_ERROR_WARNING |
-                                     CAN_IT_ERROR_PASSIVE |
-                                     CAN_IT_BUSOFF |
-                                     CAN_IT_LAST_ERROR_CODE |
-                                     CAN_IT_ERROR) != HAL_OK)
+    canLastStartAttemptTick = currentTick;
+    if (CAN_StartHardware() != HAL_OK)
     {
-        Error_Handler();
+        canHardwareStarted = false;
     }
 }
 

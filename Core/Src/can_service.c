@@ -53,6 +53,9 @@ void CanService_Task(void const *argument)
     uint8_t dataLength = 0u;
 
     (void)argument;
+#if CAN_ENABLE == 1
+    CAN_CreateMutex();
+#endif
     Board_InitRuntimeOutputs();
 
     for (;;)
@@ -60,6 +63,7 @@ void CanService_Task(void const *argument)
 #if CAN_ENABLE == 1
         CanService_HandleErrorState();
         CAN_ProcessPendingDiagnosticLog();
+        CAN_ProcessStartRetry();
 
         while (CAN_DequeueReceivedFrame(&localHeader, CanlocalData, &dataLength))
         {

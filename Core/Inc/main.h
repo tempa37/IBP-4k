@@ -169,8 +169,6 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void my_Delay(uint32_t delay_ms);
-
 extern volatile uint8_t ips1_in;
 extern volatile uint8_t ips2_in;
 extern volatile uint8_t ips3_in;

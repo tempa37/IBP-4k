@@ -85,29 +85,6 @@ void StartTask04(void const * argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-void my_Delay(uint32_t delay_ms)
-{
-  uint32_t loopsPerMs = SystemCoreClock / 8000u;
-
-  if (loopsPerMs == 0u)
-  {
-    loopsPerMs = 1u;
-  }
-
-  while (delay_ms > 0u)
-  {
-    volatile uint32_t loops = loopsPerMs;
-
-    while (loops > 0u)
-    {
-      __NOP();
-      --loops;
-    }
-
-    --delay_ms;
-  }
-}
-
 /**
   * @brief  Точка входа приложения: инициализирует HAL, периферию и задачи RTOS.
   * @retval Код возврата, фактически не используется после запуска scheduler.
@@ -158,12 +135,10 @@ int main(void)
   /* USER CODE BEGIN 2 */
   
 
-  /* Инициализируем UART-контексты, mutex-ы и прием до запуска scheduler. */
-  my_Delay(100);
+  /* Инициализируем UART-контексты и прием до запуска scheduler. */
+  HAL_Delay(100);
   UART_Init();
-  my_Delay(100);
-  UART_CreateMutexes();
-  my_Delay(100);
+  HAL_Delay(100);
   UART_StartAllReceptions();
 
   /* USER CODE END 2 */
@@ -405,6 +380,9 @@ void StartTask02(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
   /* Передает управление сервису Modbus-опроса батарейных блоков. */
+#if UARTS_ENABLE == 1
+  UART_CreateMutexes();
+#endif
   BatteryModbus_Task(argument);
   /* USER CODE END StartTask02 */
 }
